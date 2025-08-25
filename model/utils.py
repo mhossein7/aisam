@@ -4,10 +4,10 @@ from matplotlib import pyplot as plt
 
 def repetitive_stim_maker(num_repeat,total_time,off_first = False):
     '''
-    num_repeat: number of segments each made of repetitive cycles (e.g., if 2, [11110000])
-    total_time: span of the stimulation experiment. For example, if 20, it means 20 cycles (and for a 5 min stim sampling, 100 mins).
-    off_first: bool whether stim starts with off signal or not. Defaults is False
-    **Example**:
+    num_repeat: number of segments each made of repetitive cycles (e.g., if 2, [11110000])\\
+    total_time: span of the stimulation experiment. For example, if 20, it means 20 cycles (and for a 5 min stim sampling, 100 mins).\\
+    off_first: bool whether stim starts with off signal or not. Defaults is False.\\
+    **Example**:\\
     num_repeat = 4 and total_time = 60 means [[15 ones and 15 zeros, 15 ones and 15 zeros]
     '''
     num_reps = int(np.floor(total_time/num_repeat))
