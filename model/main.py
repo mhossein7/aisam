@@ -1,6 +1,7 @@
 import models
 import utils
 
+
 import numpy as np
 
 stim_vec2 = utils.repetitive_stim_maker(2,80)
@@ -41,4 +42,4 @@ for i in range(10):
         mega_res[f'cell {i+1}'].append(results)
 
 
-utils.plot_w_bckgrnd(mega_res,np.concatenate(stim_vec,stim_vec),t_max)
+utils.plot_w_bckgrnd(mega_res,np.concatenate((stim_vec,stim_vec)),t_max)
