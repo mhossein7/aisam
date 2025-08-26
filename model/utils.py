@@ -20,7 +20,7 @@ def repetitive_stim_maker(num_repeat,total_time,off_first = False):
 
 
 
-def plot_w_bckgrnd(mega_res,stim_vec_tot,t_max,sampling=10,save=None):
+def plot_w_bckgrnd(mega_res,stim_vec_tot,t_max,species = 'F',sampling=10,color= 'b',save=None,axes = False,ax_out=None):
     '''
     mega_res: dictionary with all cell simulation results
     stim_vec_tot: list of arrays of stims in the form of 1 and 0 for the whole history of simulation
@@ -28,7 +28,12 @@ def plot_w_bckgrnd(mega_res,stim_vec_tot,t_max,sampling=10,save=None):
     sampling: data sampling during simulation (default = 10) 
     save: a dictionary with information about saving the figure. Default is None which causes only showing the figure
     '''
-    fig, ax = plt.subplots(figsize=(8, 4))
+    if ax_out is not None: 
+        ax = ax_out
+        
+    else: 
+        fig, ax = plt.subplots(figsize=(8, 4))
+    
     for j in range(len(stim_vec_tot)):
         for i, val in enumerate(stim_vec_tot[j]):
             x_start = j*t_max*sampling + i * 5*sampling
@@ -38,11 +43,16 @@ def plot_w_bckgrnd(mega_res,stim_vec_tot,t_max,sampling=10,save=None):
     for k in range(len(mega_res.keys())):
         results = mega_res[f'cell {k+1}']
         for i in range(len(results)):
-            ax.plot(np.arange(t_max*i*sampling,t_max*(i+1)*sampling),(results[i]['F']),color='b',linewidth = 0.5)
+            ax.plot(np.arange(t_max*i*sampling,t_max*(i+1)*sampling),(results[i][species]),color=color,linewidth = 0.5)
 
     if save is not None:
         path = save['path']
         fig.savefig(path,dpi=300,format = 'svg')
+    elif axes == True:
+        
+        ax.set_xlabel('Time (min)')
+        ax.set_ylabel('GFP (molecule count)')
+        return ax
     else:    
         ax.set_xlabel('Time (min)')
         ax.set_ylabel('GFP (molecule count)')
