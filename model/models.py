@@ -183,7 +183,7 @@ class CcaSR_Inverter(gillespy2.Model):
         E_d = gillespy2.Reaction(name="E_dissociation", propensity_function='h2*E', reactants={E:1}, products={})
         T_c = gillespy2.Reaction(name="T_creation", propensity_function= 'alpha*E*(pow(c2*H,n)/(k+pow(c2*H,n)))', reactants={}, products={T:1})
         T_d = gillespy2.Reaction(name="T_dissociation", propensity_function='delta*T', reactants={T:1}, products={})
-        F_c = gillespy2.Reaction(name="F_creation", propensity_function= 'beta/(1+pow(T/k_tet,n_tet))', reactants={}, products={F:1})
+        F_c = gillespy2.Reaction(name="F_creation", propensity_function= 'beta*E/(1+pow(T/k_tet,n_tet))', reactants={}, products={F:1})
         F_d = gillespy2.Reaction(name="F_dissociation", propensity_function='delta*F', reactants={F:1}, products={})
     
         self.add_reaction([H_c,H_d,E_c,E_d,T_c,T_d,F_c,F_d])
