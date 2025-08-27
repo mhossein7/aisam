@@ -20,7 +20,7 @@ def repetitive_stim_maker(num_repeat,total_time,off_first = False):
 
 
 
-def plot_w_bckgrnd(mega_res,stim_vec_tot,t_max,species = 'F',sampling=10,color= 'b',save=None,axes = False,ax_out=None):
+def plot_w_bckgrnd(mega_res,stim_vec_tot,t_max,species = 'F',sampling=10,line_color= 'b',save=None,axes = False,ax_out=None):
     '''
     mega_res: dictionary with all cell simulation results
     stim_vec_tot: list of arrays of stims in the form of 1 and 0 for the whole history of simulation
@@ -43,16 +43,17 @@ def plot_w_bckgrnd(mega_res,stim_vec_tot,t_max,species = 'F',sampling=10,color= 
     for k in range(len(mega_res.keys())):
         results = mega_res[f'cell {k+1}']
         for i in range(len(results)):
-            ax.plot(np.arange(t_max*i*sampling,t_max*(i+1)*sampling),(results[i][species]),color=color,linewidth = 0.5)
+            ax.plot(np.arange(t_max*i*sampling,t_max*(i+1)*sampling),(results[i][species]),color=line_color,linewidth = 0.5)
 
     if save is not None:
         path = save['path']
         fig.savefig(path,dpi=300,format = 'svg')
-    elif axes == True:
         
+    elif axes == True:
         ax.set_xlabel('Time (min)')
         ax.set_ylabel('GFP (molecule count)')
         return ax
+    
     else:    
         ax.set_xlabel('Time (min)')
         ax.set_ylabel('GFP (molecule count)')
