@@ -227,3 +227,77 @@ class CcaSR_Inverter(gillespy2.Model):
         results = self.run(number_of_trajectories = 1, algorithm= 'Tau-Hybrid')
         new_state = self.give_updates(results)
         return results,new_state
+    
+    
+class Simple_spring_mass():
+    def __init__(self,m,k,c,xr = 0,x0=0,v0=0,g=10,dt=0.1):
+        self.m = m
+        self. k = k
+        self.c = c
+        self.xr= xr
+        self.v0 = v0
+        self.x0 = x0
+        self.g = g
+        self.dt = dt
+        
+        self.x = [x0]
+        self.v = [v0]
+        self.U = [0]
+        self.time = 0
+        return
+    
+    def __str__(self):
+        sampling = int(1/self.dt)
+        if self.time < 5:
+            i = int(np.floor(self.time))
+            past_forces = np.array(self.U)[-1*np.arange(1,i*sampling,sampling)][::-1]
+            past_positions = np.array(self.x)[-1*np.arange(1,i*sampling,sampling)][::-1]
+            past_velocities = np.array(self.v)[-1*np.arange(1,i*sampling,sampling)][::-1]
+        else: 
+            i = 5
+            past_forces = np.array(self.U)[-1*np.arange(1,i*sampling,sampling)][::-1]
+            past_positions = np.array(self.x)[-1*np.arange(1,i*sampling,sampling)][::-1]
+            past_velocities = np.array(self.v)[-1*np.arange(1,i*sampling,sampling)][::-1]
+        return f'''
+                        System description:
+                            mass (m)= {self.m}
+                            spring constant (k)= {self.k}
+                            damper constant (c)= {self.c}
+                            spring resting location (x_r)= {self.xr}
+                            gravity constant (g) = {self.g}
+                            current position (x) = {self.x[-1]}
+                            current velocity (v) = {self.v[-1]}
+                            current force (u) = {self.U[-1]}
+                            current time (t) = {self.time} s
+                            forces applied in the past {i} s = {past_forces}
+                            position in the past {i} s = {past_positions}
+                            velocity applied in the past {i} s = {past_velocities}
+                        System dynamics: 
+                            dv = dt/m *(-k*(x-x_r) - v*c + u + m*g) 
+                            dx = dt*v
+                            v[t+1] = v[t] + dv
+                            x[t+1] = x[t] + dx
+        '''
+    def exert(self,u):
+        self.U.append(u)
+        dv = self.dt/self.m*(-self.k*(self.x[-1]-self.xr)-self.v[-1]*self.c+u+self.m*self.g)
+        v_t = self.v[-1] + dv
+        dx = v_t*self.dt
+        x_t = self.x[-1] + dx
+        self.x.append(x_t)
+        self.v.append(v_t)
+        self.time+= self.dt
+    
+    def control(self,x_g,p):
+        #closed loop (proportional-integral)
+        if self.x[-1]== x_g : return
+        else: 
+            hist = self.x
+            errors = [x_g - x for x in hist]
+            integral = np.sum(errors)*self.dt
+            self.exert(p*integral)
+            return p*integral
+    
+    def state(self):
+        return self.x,self.v
+     
