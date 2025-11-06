@@ -271,13 +271,25 @@ class Simple_spring_mass():
                             current time (t) = {self.time} s
                             forces applied in the past {i} s = {past_forces}
                             position in the past {i} s = {past_positions}
-                            velocity applied in the past {i} s = {past_velocities}
+                            velocity in the past {i} s = {past_velocities}
                         System dynamics: 
                             dv = dt/m *(-k*(x-x_r) - v*c + u + m*g) 
                             dx = dt*v
                             v[t+1] = v[t] + dv
                             x[t+1] = x[t] + dx
         '''
+    def reset(self):
+        self.x = [self.x0]
+        self.v = [self.v0]
+        self.U = [0]
+        self.time = 0
+
+    def set_(self,x,v,t,U):
+        self.x = list(x)
+        self.v = list(v)
+        self.time = t
+        self.U = list(U)
+
     def exert(self,u):
         self.U.append(u)
         dv = self.dt/self.m*(-self.k*(self.x[-1]-self.xr)-self.v[-1]*self.c+u+self.m*self.g)

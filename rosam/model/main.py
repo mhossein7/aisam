@@ -1,5 +1,5 @@
 import models
-import utils
+from rosam.utils import aux
 from tqdm import tqdm
 
 import numpy as np
@@ -31,7 +31,7 @@ for i in range(10):
     Models[f'cell {i+1}'] = model
 
 for t in tqdm(range(2)):
-    stim_vec = [utils.repetitive_stim_maker(2,int(t_max/5))]
+    stim_vec = [aux.repetitive_stim_maker(2,int(t_max/5))]
     for i in range(10):
         model = Models[f'cell {i+1}']
         new_state = None if t==0 else model.give_updates(mega_res[f'cell {i+1}'][-1])
@@ -47,7 +47,7 @@ for i in range(10):
     
 fig,ax = plt.subplots(1,1,figsize = (6,4))
 
-utils.plot_w_bckgrnd(mega_res,[np.concatenate(tot_stim_vec[-1])],t_max,line_color= 'b',axes=True,ax_out=ax)
+aux.plot_w_bckgrnd(mega_res,[np.concatenate(tot_stim_vec[-1])],t_max,line_color= 'b',axes=True,ax_out=ax)
 #utils.plot_w_bckgrnd(mega_res,np.concatenate(tot_stim_vec),t_max,'T',line_color = 'r',axes=True,ax_out = ax[1])
 plt.tight_layout()
 plt.show()
