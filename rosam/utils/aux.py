@@ -59,3 +59,11 @@ def plot_w_bckgrnd(mega_res,stim_vec_tot,t_max,species = 'F',sampling=10,line_co
         ax.set_ylabel('GFP (molecule count)')
         plt.tight_layout()
         plt.show()  
+        
+        
+def background_plotter(ax,stim_vec,sampling = 10, stim_period=5):
+    for i, val in enumerate(stim_vec):
+            x_start =  sampling*i * stim_period
+            x_end = x_start + sampling*stim_period
+            color = 'green' if val == 1 else 'red'
+            ax.axvspan(x_start, x_end, facecolor=color, alpha=0.2)
