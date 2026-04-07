@@ -7,7 +7,9 @@ import os
 from tqdm import tqdm
 import copy 
 import gillespy2
-
+import dill
+from pathlib import Path
+from datetime import datetime
 
 class Cell_sim():
     def __init__(self,circuit:str):
@@ -68,7 +70,6 @@ class Cell_sim():
     
         
 
-
 class experiment():
     def __init__(self,params,circuit:str = 'CcaSR'):
         self.circuit = circuit
@@ -77,9 +78,11 @@ class experiment():
         
     def init_exp(self,num_cells):
         self.Cells = {}
+           
         for i in range(num_cells):
+            params = self.params[i] if isinstance(self.params,list) else self.params
             self.Cells[f'{i+1}'] = Cell_sim(self.circuit)
-            self.Cells[f'{i+1}'].assign_parameters(self.params)
+            self.Cells[f'{i+1}'].assign_parameters(params)
             self.Cells[f'{i+1}'].assign_model()
             self.Cells[f'{i+1}'].model.init_rxn()
             self.Cells[f'{i+1}'].assign_features()
@@ -92,6 +95,22 @@ class experiment():
             results = model.run_multi_rxn(stim_vec=stim_vec,num_trajectories = num_realizations)
             self.Cells[f'{i+1}'].assign_run(stim_vec,results,num_realizations)
                 
-
+    def save_cells(self,root_address,standard_naming=True,custom_name = ""):
+        label = self.circuit
+        if standard_naming:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            
+            address = Path(root_address) / f"{label}_{date_str}" 
+            address.mkdir(parents=True, exist_ok=True)
+        
+            time_str = datetime.now().strftime("%H-%M-%S")
+            file_path = address / f"simulation_{time_str}.pkl"       
+        else:
+            address = Path(root_address) / f'{label}_{custom_name}'
+            address.mkdir(parents=True, exist_ok=True)
+            file_path = address / f"simulation_{time_str}.pkl" 
+            
+        with open(file_path, "wb") as f:
+            dill.dump(self.Cells, f)
 
 

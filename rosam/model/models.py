@@ -53,6 +53,11 @@ class Simple(gillespy2.Model):
 class RXN(gillespy2.Model):
     def __init__(self,name = ""):
         super().__init__(name=name)
+        self.reporter_species = None
+        self.input_species = None
+        self.time = 0
+        self.events = []
+        
         
     def update_events(self,stim_vec):
         self.events.append(stim_vec)
@@ -101,16 +106,13 @@ class RXN(gillespy2.Model):
         results = self.run(number_of_trajectories = num_trajectories, algorithm= 'Tau-Hybrid')
         return results
 
-class CcaSR(gillespy2.Model):
+class CcaSR(RXN):
     def __init__(self,params):
         super().__init__(name='CcaSR')
         self.params = params
         self.t_max = params['t_max']
         self.sampling = params['sampling']
-        self.reporter_species = None
-        self.input_species = None
-        self.time = 0
-        self.events = []
+
     
     def init_rxn(self):
         params = SimpleNamespace(**self.params)
@@ -154,59 +156,16 @@ class CcaSR(gillespy2.Model):
         F_d = gillespy2.Reaction(name="F_dissociation", propensity_function='delta*F', reactants={F:1}, products={})
     
         self.add_reaction([H_c,H_d,E_c,E_d,F_c,F_d])
-    
-    def update_events(self,stim_vec):
-        self.events.append(stim_vec)
-    
-    def update_rxn(self,stim_vec):
-        self.delete_all_events()
-        if len(self.events)!=0:
-            for (i,leftover_delay) in list(zip([-2,-1],['2','7'])):
-                ea = gillespy2.EventAssignment(variable=self.input_species, expression=self.events[-1][i])
-                et = gillespy2.EventTrigger(expression='1',initial_value=False)
-                e = gillespy2.Event(name=f'lf_event{np.abs(i)}', trigger=et, assignments=[ea],delay=leftover_delay)
-                self.add_event([e])
-                
-        for i,stim in enumerate(stim_vec):
-            ea = gillespy2.EventAssignment(variable=self.input_species, expression=stim)
-            et = gillespy2.EventTrigger(expression='1',initial_value=False)
-            e = gillespy2.Event(name=f'event{i}', trigger=et, assignments=[ea],delay=f'{(5*i)+self.params['tau_delay']}')
-            self.add_event([e])
-        self.update_events(stim_vec)
-    
-    def get_updates(self,updates):
-        self.delete_all_species()
-        for name,value in updates.items():
-            self.add_species(gillespy2.Species(name = name, initial_value= value, mode = 'discrete'))    
-
-    def give_updates(self,results):
-        updates = {}
-        for name in self.get_all_species().keys():
-                updates[name] = results[name][-1]
-        return updates
-    
-    def run_online_rxn(self,updates,stim_vec):
-        tspan = gillespy2.TimeSpan.linspace(t=self.t_max, num_points=int(self.t_max*self.sampling))
-        self.timespan(tspan)
-        if updates is not None:
-            self.get_updates(updates)
-        self.update_rxn(stim_vec)
-        results = self.run(number_of_trajectories = 1, algorithm= 'Tau-Hybrid')
-        new_state = self.give_updates(results)
-        return results,new_state
+   
     
     
-    
-class CcaSR_Inverter(gillespy2.Model):
+class CcaSR_Inverter(RXN):
     def __init__(self,params):
         super().__init__(name='CcaSR_Inverter')
         self.params = params
         self.t_max = params['t_max']
         self.sampling = params['sampling']
-        self.reporter_species = None
-        self.input_species = None
-        self.time = 0
-        self.events = []
+
     
     def init_rxn(self):
         params = SimpleNamespace(**self.params)
@@ -261,55 +220,7 @@ class CcaSR_Inverter(gillespy2.Model):
     
         self.add_reaction([H_c,H_d,E_c,E_d,T_c,T_d,F_c,F_d])
         
-        
-    def update_events(self,stim_vec):
-        self.events.append(stim_vec)
-    
-    def update_rxn(self,stim_vec):
-        self.delete_all_events()
-        if len(self.events)!=0:
-            for (i,leftover_delay) in list(zip([-2,-1],['2','7'])):
-                ea = gillespy2.EventAssignment(variable=self.input_species, expression=self.events[-1][i])
-                et = gillespy2.EventTrigger(expression='1',initial_value=False)
-                e = gillespy2.Event(name=f'lf_event{np.abs(i)}', trigger=et, assignments=[ea],delay=leftover_delay)
-                self.add_event([e])
-        
-        for i,stim in enumerate(stim_vec):
-            ea = gillespy2.EventAssignment(variable=self.input_species, expression=stim)
-            et = gillespy2.EventTrigger(expression='1',initial_value=False)
-            e = gillespy2.Event(name=f'event{i}', trigger=et, assignments=[ea],delay=f'{(5*i)+self.params['tau_delay']}') 
-            self.add_event([e])
-        self.update_events(stim_vec)
-    
-    def get_updates(self,updates):
-        self.delete_all_species()
-        for name,value in updates.items():
-            self.add_species(gillespy2.Species(name = name, initial_value= value, mode = 'discrete'))    
-
-    def give_updates(self,results):
-        updates = {}
-        for name in self.get_all_species().keys():
-                updates[name] = results[name][-1]
-        return updates
-    
-    def run_online_rxn(self,updates,stim_vec):
-        tspan = gillespy2.TimeSpan.linspace(t=self.t_max, num_points=int(self.t_max*self.sampling))
-        self.timespan(tspan)
-        if updates is not None:
-            self.get_updates(updates)
-        self.update_rxn(stim_vec)
-        results = self.run(algorithm= 'Tau-Hybrid')
-        new_state = self.give_updates(results)
-        return results,new_state
-    
-    def run_multi_rxn(self,stim_vec,num_trajectories = 1):
-        tspan = gillespy2.TimeSpan.linspace(t=self.t_max, num_points=int(self.t_max*self.sampling))
-        self.timespan(tspan)
-        self.update_rxn(stim_vec)
-        results = self.run(number_of_trajectories = num_trajectories, algorithm= 'Tau-Hybrid')
-        return results
-    
-    
+   
 
 class ODE_CcaSR():
     def __init__(self,params,t_max,sampling = 10):
