@@ -1,7 +1,7 @@
 import numpy as np
-import rosam
-from rosam.model import models
-from rosam.utils import aux
+import aisam
+from aisam.model import models
+from aisam.utils import aux
 import json
 import os
 from tqdm import tqdm

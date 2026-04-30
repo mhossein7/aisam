@@ -1,5 +1,5 @@
-import rosam.model.models as models
-from rosam.utils import aux
+import aisam.model.models as models
+from aisam.utils import aux
 from tqdm import tqdm
 
 import numpy as np

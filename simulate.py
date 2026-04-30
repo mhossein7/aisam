@@ -1,7 +1,7 @@
 import argparse
 import json
-from rosam.utils import aux
-from rosam.model import sims
+from aisam.utils import aux
+from aisam.model import sims
 
 
 if __name__ == "__main__":
