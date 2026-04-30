@@ -6,15 +6,15 @@
 graph TD
     simulate_py[simulate.py]
 
-    rosam[rosam package]
-    model_pkg[rosam.model]
-    utils_pkg[rosam.utils]
-    comptools_pkg[rosam.comptools]
+    aisam[aisam package]
+    model_pkg[aisam.model]
+    utils_pkg[aisam.utils]
+    comptools_pkg[aisam.comptools]
 
-    sims_py[rosam/model/sims.py]
-    models_py[rosam/model/models.py]
-    aux_py[rosam/utils/aux.py]
-    tf_py[rosam/comptools/transformer_forecaster.py]
+    sims_py[aisam/model/sims.py]
+    models_py[aisam/model/models.py]
+    aux_py[aisam/utils/aux.py]
+    tf_py[aisam/comptools/transformer_forecaster.py]
 
     gillespy2[gillespy2]
     numpy[numpy]
@@ -28,9 +28,9 @@ graph TD
     simulate_py --> aux_py
     simulate_py --> json
 
-    rosam --> model_pkg
-    rosam --> utils_pkg
-    rosam --> comptools_pkg
+    aisam --> model_pkg
+    aisam --> utils_pkg
+    aisam --> comptools_pkg
 
     sims_py --> models_py
     sims_py --> aux_py

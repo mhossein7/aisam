@@ -3,7 +3,7 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rosam"
+name = "aisam"
 version = "0.1.0"
 description = "A package for identifying dynamic systems with local LLM tools"
 authors = [{ name = "Hossein Moghimian" }]
