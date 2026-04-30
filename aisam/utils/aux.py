@@ -84,6 +84,64 @@ def load_params(address):
         params = json.load(f)
     return params
 
+def sample_noisy_params(address, temperature=0.1, rng=None, clip_min=None):
+    '''
+    Load parameters from a JSON file and return a noisy copy where each parameter
+    is sampled from a Normal distribution centered on its original value.
+
+    address: path to the JSON parameter file.
+    temperature: controls stochasticity; std is set to abs(value) * temperature.
+    rng: optional numpy random generator for reproducibility.
+    clip_min: optional lower-bound applied to sampled numeric values.
+    '''
+    if temperature < 0:
+        raise ValueError("temperature must be non-negative.")
+
+    params = load_params(address)
+    generator = rng if rng is not None else np.random.default_rng()
+
+    noisy_params = {}
+    for key, value in params.items():
+        if isinstance(value, (int, float)):
+            std = abs(value) * temperature
+            sampled = generator.normal(loc=value, scale=std)
+            if clip_min is not None:
+                sampled = max(sampled, clip_min)
+            noisy_params[key] = float(sampled)
+        else:
+            noisy_params[key] = value
+
+    return noisy_params
+
+def sample_noisy_params_from_dict(params, temperature=0.1, rng=None, clip_min=None):
+    '''
+    Return a noisy copy of a parameter dictionary where each numeric parameter
+    is sampled from a Normal distribution centered on its original value.
+
+    params: parameter dictionary.
+    temperature: controls stochasticity; std is set to abs(value) * temperature.
+    rng: optional numpy random generator for reproducibility.
+    clip_min: optional lower-bound applied to sampled numeric values.
+    '''
+    if temperature < 0:
+        raise ValueError("temperature must be non-negative.")
+    if not isinstance(params, dict):
+        raise ValueError("params must be a dictionary.")
+
+    generator = rng if rng is not None else np.random.default_rng()
+    noisy_params = {}
+    for key, value in params.items():
+        if isinstance(value, (int, float)):
+            std = abs(value) * temperature
+            sampled = generator.normal(loc=value, scale=std)
+            if clip_min is not None:
+                sampled = max(sampled, clip_min)
+            noisy_params[key] = float(sampled)
+        else:
+            noisy_params[key] = value
+
+    return noisy_params
+
 def save_stims(stims,address):
     with open(address + 'stims.json','w') as f:
         json.dump(stims,f)
