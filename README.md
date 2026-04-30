@@ -1,3 +1,3 @@
-# AISAM: AI for scientific automated microscopy
+# AISAM: AI scientist for automated microscopy
 
 
