@@ -67,7 +67,8 @@ def plot_w_bckgrnd(mega_res,stim_vec_tot,t_max,species = 'F',sampling=10,line_co
         plt.show()  
         
         
-def background_plotter(ax,stim_vec,sampling = 10, stim_period=5):
+def background_plotter(ax,stim_vec,sampling = 10, stim_period=5,averaged=False):
+    if averaged: sampling = 1
     for i, val in enumerate(stim_vec):
             x_start =  sampling*i * stim_period
             x_end = x_start + sampling*stim_period
@@ -91,3 +92,14 @@ def load_stims(address):
     with open(address,'r') as f:
         stims = json.load(f)
     return stims
+
+
+def average_stochastic_trace(trajectory,sampling=10):
+    len_trace = len(trajectory)
+    averaged_trace = [np.mean(trajectory[i:i+sampling]) for i in np.arange(len_trace,step = sampling)]
+    return averaged_trace
+
+def sample_from_stochastic_trace(trajectory,sampling = 50):
+    len_trace = len(trajectory)
+    sampled_trace = [trajectory[i] for i in np.arange(len_trace,step=sampling)]
+    return sampled_trace
