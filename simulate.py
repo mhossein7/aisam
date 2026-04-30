@@ -119,3 +119,6 @@ if __name__ == "__main__":
             }
             with open(sim_dir / "config.json", "w") as f:
                 json.dump(noisy_config, f, indent=2)
+
+def test():
+    print('test')
