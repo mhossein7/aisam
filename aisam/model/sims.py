@@ -108,9 +108,10 @@ class experiment():
         else:
             address = Path(root_address) / f'{label}_{custom_name}'
             address.mkdir(parents=True, exist_ok=True)
+            time_str = datetime.now().strftime("%H-%M-%S")
             file_path = address / f"simulation_{time_str}.pkl" 
             
         with open(file_path, "wb") as f:
             dill.dump(self.Cells, f)
 
-
+        return file_path
