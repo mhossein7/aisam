@@ -1,6 +1,26 @@
 import numpy as np
 from matplotlib import pyplot as plt
 import json
+from os import PathLike
+from pathlib import Path
+
+CIRCUIT_PARAMETER_SCHEMAS = {
+    "simple": ["delta"],
+    "ccasr": ["alpha", "k", "n", "tau_delay", "h1", "h2", "c2", "delta"],
+    "inverter": [
+        "alpha",
+        "beta",
+        "k_tet",
+        "k",
+        "n",
+        "n_tet",
+        "tau_delay",
+        "h1",
+        "h2",
+        "c2",
+        "delta",
+    ],
+}
 
 def repetitive_stim_maker(num_repeat,total_time,off_first = False):
     '''
@@ -84,6 +104,82 @@ def load_params(address):
         params = json.load(f)
     return params
 
+def config_generator(
+    circuit,
+    output_dir,
+    t_max,
+    sampling=10,
+    num_cells=1000,
+    num_realizations=1,
+    filename="config.json",
+    params=None,
+    save_params_file=True,
+    **kwargs,
+):
+    """
+    Generate a simulation/training config file for a supported circuit.
+
+    Circuit parameters can be passed either through `params={...}` or directly
+    as keyword arguments. Known circuit schemas are `ccasr`, `inverter`, and
+    `simple`. Extra keyword arguments are preserved in the config as additional
+    hyperparameters.
+
+    Returns `(config_path, config)`.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    circuit_key = circuit.lower()
+    required_params = CIRCUIT_PARAMETER_SCHEMAS.get(circuit_key)
+    if required_params is None:
+        raise ValueError(
+            f"Unknown circuit {circuit!r}. Supported circuits: "
+            f"{sorted(CIRCUIT_PARAMETER_SCHEMAS.keys())}"
+        )
+
+    circuit_params = dict(params or {})
+    for key in required_params:
+        if key in kwargs:
+            circuit_params[key] = kwargs.pop(key)
+
+    missing = [key for key in required_params if key not in circuit_params]
+    if missing:
+        raise ValueError(f"Missing required parameters for {circuit!r}: {missing}")
+
+    circuit_params["t_max"] = t_max
+    circuit_params["sampling"] = sampling
+
+    params_path = None
+    if save_params_file:
+        params_path = output_dir / "simulation_params.json"
+        with open(params_path, "w") as f:
+            json.dump(_json_safe(circuit_params), f, indent=2)
+
+    root_folder = str(output_dir)
+    if not root_folder.endswith("/"):
+        root_folder += "/"
+
+    config = {
+        "circuit": circuit,
+        "label": circuit,
+        "t_max": t_max,
+        "sampling": sampling,
+        "num_cells": num_cells,
+        "num_realizations": num_realizations,
+        "root_folder": root_folder,
+        "params": _json_safe(circuit_params),
+        "circuit_parameters": _json_safe(circuit_params),
+    }
+    if params_path is not None:
+        config["params_path"] = str(params_path)
+    config.update(_json_safe(kwargs))
+
+    config_path = output_dir / filename
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+
+    return config_path, config
+
 def sample_noisy_params(address, temperature=0.1, rng=None, clip_min=None):
     '''
     Load parameters from a JSON file and return a noisy copy where each parameter
@@ -161,3 +257,18 @@ def sample_from_stochastic_trace(trajectory,sampling = 50):
     len_trace = len(trajectory)
     sampled_trace = [trajectory[i] for i in np.arange(len_trace,step=sampling)]
     return sampled_trace
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, PathLike):
+        return str(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return value
