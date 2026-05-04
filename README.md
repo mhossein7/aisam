@@ -1,16 +1,55 @@
 # AISAM: AI scientist for automated microscopy
 
+## Standard training data pipeline
+
+```mermaid
+graph TD
+    root[root_folder]
+    cfg[config.json<br/>circuit/label<br/>t_max<br/>sampling<br/>num_realizations<br/>num_cells=1000<br/>output_root optional<br/>random_seed optional]
+    params[simulation_params.json<br/>circuit parameters<br/>CcaSR: alpha, k, n, tau_delay, h1, h2, c2, delta<br/>Inverter adds beta, k_tet, n_tet]
+    noisy_opts[optional noisy settings<br/>noisy_sims<br/>temperatures]
+    model_opts[optional model settings<br/>model type<br/>past/future windows<br/>feature/output species<br/>sample_interval_minutes]
+
+    run[training.run_training_simulation]
+    stims[standard 1000-cell stims<br/>1-900 random<br/>901-950 repetitive red-first<br/>951-1000 repetitive green-first]
+    sim[standard GillesPy simulation<br/>1000 cells x num_realizations]
+    saved[run folder<br/>{label}_{timestamp}<br/>simulation.pkl<br/>simulation_params.json<br/>stims.json<br/>config.json]
+
+    noisy[optional noisy simulations<br/>sample noisy parameter dictionaries<br/>1000 cells each]
+    noisy_saved[noisy/sim_i folders<br/>simulation.pkl<br/>simulation_params.json<br/>stims.json<br/>config.json]
+
+    train[optional downstream training<br/>training.training]
+    preprocess[forecaster preprocessing<br/>sample input/expression traces<br/>at sample_interval_minutes]
+    model[model artifacts<br/>model.pkl<br/>config.json<br/>metrics]
+
+    root --> cfg
+    root --> params
+    cfg --> run
+    params --> run
+    noisy_opts --> run
+    run --> stims
+    stims --> sim
+    run --> sim
+    sim --> saved
+    noisy_opts --> noisy
+    saved --> noisy
+    noisy --> noisy_saved
+    model_opts --> train
+    saved --> train
+    train --> preprocess
+    preprocess --> model
+```
+
 ## Codebase dependency graph
 
 ```mermaid
 graph TD
-    simulate_py[simulate.py]
-
     aisam[aisam package]
     model_pkg[aisam.model]
     utils_pkg[aisam.utils]
     comptools_pkg[aisam.comptools]
 
+    training_py[aisam/utils/training.py]
     sims_py[aisam/model/sims.py]
     models_py[aisam/model/models.py]
     aux_py[aisam/utils/aux.py]
@@ -24,9 +63,9 @@ graph TD
     dill[dill]
     json[json]
 
-    simulate_py --> sims_py
-    simulate_py --> aux_py
-    simulate_py --> json
+    training_py --> sims_py
+    training_py --> aux_py
+    training_py --> json
 
     aisam --> model_pkg
     aisam --> utils_pkg
@@ -54,16 +93,15 @@ graph TD
 
 ```mermaid
 graph TD
-    run_cli[simulate.py main]
+    run_cli[training.run_training_simulation]
 
     load_cfg[Load config JSON]
     load_params[aux.load_params]
-    load_stims[aux.load_stims]
 
     exp_init[sims.experiment.__init__]
     init_exp[sims.experiment.init_exp]
     run_train[sims.experiment.run_training_sim]
-    save_cells[sims.experiment.save_cells]
+    save_outputs[Save simulation.pkl/config/stims/params]
 
     cell_ctor[Cell_sim]
     assign_params[Cell_sim.assign_parameters]
@@ -78,11 +116,10 @@ graph TD
 
     run_cli --> load_cfg
     run_cli --> load_params
-    run_cli --> load_stims
     run_cli --> exp_init
     run_cli --> init_exp
     run_cli --> run_train
-    run_cli --> save_cells
+    run_cli --> save_outputs
 
     init_exp --> cell_ctor
     init_exp --> assign_params

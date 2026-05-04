@@ -2,6 +2,8 @@ import dill
 import numpy as np
 from os import PathLike
 
+from aisam.utils import aux
+
 
 class RidgeRegressor:
     """Small multi-output ridge regressor with a scikit-learn-like interface."""
@@ -55,6 +57,8 @@ class RegressionForecaster:
         future_input_window=None,
         regressor=None,
         normalize=True,
+        sampling=None,
+        sample_interval_minutes=None,
     ):
         self.past_feature_window = int(past_feature_window)
         self.future_window = int(future_window)
@@ -62,6 +66,8 @@ class RegressionForecaster:
         self.future_input_window = int(future_input_window or future_window)
         self.regressor = regressor if regressor is not None else RidgeRegressor()
         self.normalize = normalize
+        self.sampling = sampling
+        self.sample_interval_minutes = sample_interval_minutes
         self.x_mean_ = None
         self.x_std_ = None
         self.y_mean_ = None
@@ -228,6 +234,43 @@ def make_window_dataset(
     return np.vstack(X_rows), np.vstack(y_rows), meta
 
 
+def sample_sequences_at_interval(sequences, sampling, sample_interval_minutes=None):
+    """
+    Downsample feature, input, and output traces before windowing.
+
+    `sampling` is the dense simulation sampling rate in values per minute.
+    For `sampling=10` and `sample_interval_minutes=5`, indices 0, 50, 100, ...
+    are kept for every sequence array.
+    """
+    if sample_interval_minutes is None:
+        return list(sequences)
+    if sampling is None:
+        raise ValueError("sampling must be provided when sample_interval_minutes is set.")
+
+    sampled = []
+    for seq in sequences:
+        sampled_seq = dict(seq)
+        sampled_seq["features"] = aux.sample_trace_at_interval(
+            seq["features"],
+            simulation_sampling=sampling,
+            interval_minutes=sample_interval_minutes,
+        )
+        sampled_seq["inputs"] = aux.sample_trace_at_interval(
+            seq["inputs"],
+            simulation_sampling=sampling,
+            interval_minutes=sample_interval_minutes,
+        )
+        sampled_seq["output"] = aux.sample_trace_at_interval(
+            seq["output"],
+            simulation_sampling=sampling,
+            interval_minutes=sample_interval_minutes,
+        )
+        sampled_seq["sample_interval_minutes"] = float(sample_interval_minutes)
+        sampled_seq["source_sampling"] = int(sampling)
+        sampled.append(sampled_seq)
+    return sampled
+
+
 def train_regression_forecaster(
     train_data,
     past_feature_window,
@@ -241,6 +284,8 @@ def train_regression_forecaster(
     stride=1,
     validation_fraction=0.2,
     random_state=None,
+    sampling=None,
+    sample_interval_minutes=None,
 ):
     """
     Train a RegressionForecaster from saved cells, a pickle path, or prebuilt sequences.
@@ -253,6 +298,11 @@ def train_regression_forecaster(
     train/validation arrays plus the split sequences for downstream inspection.
     """
     sequences = _coerce_sequences(train_data, feature_species, output_species)
+    sequences = sample_sequences_at_interval(
+        sequences,
+        sampling=sampling,
+        sample_interval_minutes=sample_interval_minutes,
+    )
     train_sequences, validation_sequences = split_sequences_by_cell(
         sequences,
         validation_fraction=validation_fraction,
@@ -275,6 +325,8 @@ def train_regression_forecaster(
         future_input_window=future_input_window,
         regressor=regressor,
         normalize=normalize,
+        sampling=sampling,
+        sample_interval_minutes=sample_interval_minutes,
     )
     forecaster.fit(X_train, y_train)
     metrics = {"train": forecaster.evaluate(X_train, y_train)}
@@ -315,6 +367,8 @@ def evaluate_regression_forecaster(
     feature_species=None,
     output_species="F",
     stride=1,
+    sampling=None,
+    sample_interval_minutes=None,
 ):
     """
     Evaluate a trained RegressionForecaster on saved cells, a pickle path, or sequences.
@@ -322,6 +376,15 @@ def evaluate_regression_forecaster(
     Returns `(metrics, predictions, dataset)`.
     """
     sequences = _coerce_sequences(eval_data, feature_species, output_species)
+    if sampling is None:
+        sampling = forecaster.sampling
+    if sample_interval_minutes is None:
+        sample_interval_minutes = forecaster.sample_interval_minutes
+    sequences = sample_sequences_at_interval(
+        sequences,
+        sampling=sampling,
+        sample_interval_minutes=sample_interval_minutes,
+    )
     X, y, meta = make_window_dataset(
         sequences,
         past_feature_window=forecaster.past_feature_window,

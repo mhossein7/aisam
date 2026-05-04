@@ -258,6 +258,24 @@ def sample_from_stochastic_trace(trajectory,sampling = 50):
     sampled_trace = [trajectory[i] for i in np.arange(len_trace,step=sampling)]
     return sampled_trace
 
+def sample_trace_at_interval(trajectory, simulation_sampling, interval_minutes):
+    """
+    Sample a dense simulation trace at a user-given interval in minutes.
+
+    `simulation_sampling` is the number of saved simulation values per minute.
+    For example, `simulation_sampling=10` and `interval_minutes=5` samples
+    indices 0, 50, 100, ...
+    """
+    if interval_minutes is None:
+        return trajectory
+    if simulation_sampling <= 0:
+        raise ValueError("simulation_sampling must be positive.")
+    if interval_minutes <= 0:
+        raise ValueError("interval_minutes must be positive.")
+
+    step = max(1, int(round(float(simulation_sampling) * float(interval_minutes))))
+    return np.asarray(trajectory)[np.arange(0, len(trajectory), step)]
+
 def _json_safe(value):
     if isinstance(value, dict):
         return {str(key): _json_safe(val) for key, val in value.items()}
