@@ -109,8 +109,10 @@ def config_generator(
     output_dir,
     t_max,
     sampling=10,
+    interval_rate = 5,
     num_cells=1000,
     num_realizations=1,
+    noisy_sims = 0,
     filename="config.json",
     params=None,
     save_params_file=True,
@@ -164,11 +166,14 @@ def config_generator(
         "label": circuit,
         "t_max": t_max,
         "sampling": sampling,
+        "interval_rate":interval_rate,
         "num_cells": num_cells,
         "num_realizations": num_realizations,
+        "noisy_sims": noisy_sims,
         "root_folder": root_folder,
         "params": _json_safe(circuit_params),
         "circuit_parameters": _json_safe(circuit_params),
+        
     }
     if params_path is not None:
         config["params_path"] = str(params_path)

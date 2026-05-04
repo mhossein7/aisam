@@ -4,7 +4,7 @@ from aisam.model import models
 from aisam.utils import aux
 import json
 import os
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import copy 
 import gillespy2
 import dill
@@ -87,9 +87,16 @@ class experiment():
             self.Cells[f'{i+1}'].model.init_rxn()
             self.Cells[f'{i+1}'].assign_features()
             
-    def run_training_sim(self,stims,num_realizations):
+    def run_training_sim(self,stims,num_realizations, progress=True, desc=None):
         num_cells = len(self.Cells.items())
-        for i in range(num_cells):
+        iterator = tqdm(
+            range(num_cells),
+            desc=desc or f"{self.circuit} simulation",
+            unit="cell",
+            dynamic_ncols=True,
+            disable=not progress,
+        )
+        for i in iterator:
             stim_vec = stims[f'cell {i+1}']
             model = self.Cells[f'{i+1}'].model
             results = model.run_multi_rxn(stim_vec=stim_vec,num_trajectories = num_realizations)

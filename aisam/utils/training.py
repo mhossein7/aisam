@@ -76,6 +76,7 @@ def run_training_simulation(
     - temperatures: optional list used to divide noisy simulations by noise level
     - output_root: optional override for the run output directory
     - include_cells: include the in-memory standard Cells object in the return
+    - progress: show a per-cell progress bar during simulation
 
     Returns a dictionary with saved paths, metadata, and noisy run results.
     """
@@ -104,6 +105,7 @@ def run_training_simulation(
     t_max = int(config.get("t_max", params.get("t_max")))
     sampling = int(config.get("sampling", params.get("sampling", 10)))
     num_realizations = int(config.get("num_realizations", 1))
+    progress = bool(config.get("progress", True))
     params.setdefault("t_max", t_max)
     params.setdefault("sampling", sampling)
 
@@ -128,6 +130,8 @@ def run_training_simulation(
         run_dir=run_dir,
         run_stamp=run_stamp,
         user_config=config,
+        progress=progress,
+        desc=f"{label} standard simulation",
     )
 
     result = {
@@ -166,6 +170,8 @@ def run_training_simulation(
                 user_config=config,
                 temperature=temp,
                 parent_run_dir=run_dir,
+                progress=progress,
+                desc=f"{label} noisy simulation {i}/{noisy_count}",
             )
             noisy_result.pop("cells", None)
             result["noisy"].append(noisy_result)
@@ -306,6 +312,7 @@ def _sample_interval_from_config(config):
         "training_sample_interval_minutes",
         "forecaster_sample_interval_minutes",
         "sample_rate_minutes",
+        "interval_rate",
     ):
         if key in config and config[key] is not None:
             return config[key]
@@ -325,13 +332,15 @@ def _run_and_save_simulation(
     user_config,
     temperature=None,
     parent_run_dir=None,
+    progress=True,
+    desc=None,
 ):
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     xpt = sims.experiment(params, label)
     xpt.init_exp(num_cells)
-    xpt.run_training_sim(stims, num_realizations)
+    xpt.run_training_sim(stims, num_realizations, progress=progress, desc=desc)
 
     simulation_path = run_dir / "simulation.pkl"
     with open(simulation_path, "wb") as f:
