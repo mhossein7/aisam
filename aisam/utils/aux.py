@@ -111,6 +111,8 @@ def config_generator(
     sampling=10,
     interval_rate = 5,
     num_cells=1000,
+    total_cell=None,
+    noisy_total_cells=350,
     num_realizations=1,
     noisy_sims = 0,
     filename="config.json",
@@ -148,6 +150,11 @@ def config_generator(
     if missing:
         raise ValueError(f"Missing required parameters for {circuit!r}: {missing}")
 
+    if total_cell is not None:
+        num_cells = total_cell
+    num_cells = _validate_total_cells(num_cells)
+    noisy_total_cells = _validate_total_cells(noisy_total_cells)
+
     circuit_params["t_max"] = t_max
     circuit_params["sampling"] = sampling
 
@@ -168,6 +175,9 @@ def config_generator(
         "sampling": sampling,
         "interval_rate":interval_rate,
         "num_cells": num_cells,
+        "total_cell": num_cells,
+        "total_cells": num_cells,
+        "noisy_total_cells": noisy_total_cells,
         "num_realizations": num_realizations,
         "noisy_sims": noisy_sims,
         "root_folder": root_folder,
@@ -184,6 +194,12 @@ def config_generator(
         json.dump(config, f, indent=2)
 
     return config_path, config
+
+def _validate_total_cells(total_cells):
+    total_cells = int(total_cells)
+    if total_cells < 200:
+        raise ValueError("total_cell must be at least 200.")
+    return total_cells
 
 def sample_noisy_params(address, temperature=0.1, rng=None, clip_min=None):
     '''

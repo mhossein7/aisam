@@ -5,31 +5,34 @@
 ```mermaid
 graph TD
     root["root_folder"]
-    cfg["config.json<br/>circuit/label<br/>t_max<br/>sampling<br/>num_realizations<br/>num_cells=1000<br/>output_root optional<br/>random_seed optional"]
+    cfg["config.json<br/>circuit/label<br/>t_max<br/>sampling<br/>num_realizations<br/>total_cell >= 200<br/>output_root optional<br/>random_seed optional"]
     params["simulation_params.json<br/>circuit parameters<br/>CcaSR: alpha, k, n, tau_delay, h1, h2, c2, delta<br/>Inverter adds beta, k_tet, n_tet"]
     noisy_opts["optional noisy settings<br/>noisy_sims<br/>temperatures"]
     model_opts["optional model settings<br/>model type<br/>past/future windows<br/>feature/output species<br/>sample_interval_minutes"]
 
     run["training.run_training_simulation"]
-    stims["standard 1000-cell stims<br/>1-900 random<br/>901-950 repetitive red-first<br/>951-1000 repetitive green-first"]
-    sim["standard GillesPy simulation<br/>1000 cells x num_realizations"]
+    stims["standard stims<br/>first total_cell - 100 random<br/>next 50 repetitive red-first<br/>last 50 repetitive green-first"]
+    sim["standard GillesPy simulation<br/>total_cell x num_realizations"]
+    out["training_data directory<br/>root_folder/training_data<br/>or assets/yymmdd/training_data<br/>when called with only config path"]
     saved["timestamped run folder<br/>simulation.pkl<br/>simulation_params.json<br/>stims.json<br/>config.json"]
 
-    noisy["optional noisy simulations<br/>sample noisy parameter dictionaries<br/>1000 cells each"]
+    noisy["optional noisy simulations<br/>sample noisy parameter dictionaries<br/>noisy_total_cells default 350<br/>250 random + 100 repetitive by default"]
     noisy_saved["noisy/sim_i folders<br/>simulation.pkl<br/>simulation_params.json<br/>stims.json<br/>config.json"]
 
     train["optional downstream training<br/>training.training"]
     preprocess["forecaster preprocessing<br/>sample input/expression traces<br/>at sample_interval_minutes"]
-    model["model artifacts<br/>model.pkl<br/>config.json<br/>metrics"]
+    model["model artifacts in run folder<br/>models/model.pkl<br/>models/config.json<br/>metrics"]
 
     root --> cfg
     root --> params
     cfg --> run
     params --> run
     noisy_opts --> run
+    run --> out
     run --> stims
     stims --> sim
     run --> sim
+    out --> saved
     sim --> saved
     noisy_opts --> noisy
     saved --> noisy
@@ -39,6 +42,62 @@ graph TD
     train --> preprocess
     preprocess --> model
 ```
+
+## Example CcaSR pipeline
+
+For a full CcaSR standard simulation with optional noisy simulations and a regression forecaster, the user supplies a root folder containing:
+
+- `config.json`: run settings such as `circuit`, `label`, `t_max`, `sampling`, `total_cell`, `num_realizations`, optional `noisy_sims`, optional `noisy_total_cells`, optional `temperatures`, and optional model settings.
+- `simulation_params.json`: CcaSR parameters `alpha`, `k`, `n`, `tau_delay`, `h1`, `h2`, `c2`, and `delta`.
+
+Minimal example `config.json`:
+
+```json
+{
+  "circuit": "ccasr",
+  "label": "ccasr",
+  "t_max": 960,
+  "sampling": 10,
+  "total_cell": 1000,
+  "num_realizations": 3,
+  "root_folder": "/path/to/run_root",
+  "noisy_sims": 2,
+  "noisy_total_cells": 350,
+  "temperatures": [0.05, 0.1],
+  "sample_interval_minutes": 5,
+  "model": {
+    "type": "regressor",
+    "past_feature_window": 20,
+    "future_window": 1,
+    "output_species": "F"
+  }
+}
+```
+
+Example `simulation_params.json`:
+
+```json
+{
+  "alpha": 0.1,
+  "k": 0.4851,
+  "n": 3.6,
+  "tau_delay": 12,
+  "h1": 0.07100805,
+  "h2": 0.0303,
+  "c2": 0.0631,
+  "delta": 0.01
+}
+```
+
+Run the full pipeline:
+
+```python
+from aisam.utils.training import training
+
+result = training("/path/to/run_root")
+```
+
+The standard simulation is saved under `root_folder/training_data/{label}_{timestamp}/`. If `noisy_sims` is greater than zero, noisy simulations are saved under that run folder in `noisy/sim_i/`. The forecaster model is trained only on the standard simulation data from the standard pipeline, then saved under the same run folder in `models/`.
 
 ## Codebase dependency graph
 
