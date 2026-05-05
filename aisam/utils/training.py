@@ -56,6 +56,98 @@ def training(config, model=None, total_cell=None, noisy_total_cells=None):
     return result
 
 
+def train_forecaster_from_simulation(
+    simulation_paths,
+    model=None,
+    output_root=None,
+    visualization=False,
+    random_state=None,
+):
+    """
+    Train a forecaster model from one or more saved `simulation.pkl` files.
+
+    When multiple simulation files are supplied, cells are merged with
+    file-specific cell ids so windows from same-numbered cells in different runs
+    are not grouped together.
+    """
+    from aisam.comptools.regression_forecaster import train_regression_forecaster
+    from aisam.utils.visualization_tools import plot_forecaster_evaluation_examples
+
+    paths = _coerce_simulation_paths(simulation_paths)
+    cells = _load_and_merge_cells(paths)
+    run_configs = [_load_run_config_from_simulation_path(path) for path in paths]
+    run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    model_config = _resolve_model_config(model or {"type": "regressor"})
+    model_type = str(model_config["type"]).lower()
+    if model_type not in {"regressor", "regression", "regression_forecaster"}:
+        raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
+
+    hyperparams = _forecaster_hyperparams_from_model_config(model_config)
+    first_config = next((cfg for cfg in run_configs if cfg), {})
+    hyperparams.setdefault("past_feature_window", 20)
+    hyperparams.setdefault("future_window", 1)
+    hyperparams.setdefault("output_species", "F")
+    hyperparams.setdefault("sampling", _sampling_from_run_config(first_config))
+    sample_interval = _sample_interval_from_config(first_config.get("user_config", {}))
+    if sample_interval is not None:
+        hyperparams.setdefault("sample_interval_minutes", sample_interval)
+    if random_state is not None:
+        hyperparams.setdefault("random_state", random_state)
+
+    forecaster, metrics, dataset = train_regression_forecaster(cells, **hyperparams)
+
+    model_root = Path(output_root or model_config.get("output_root") or (paths[0].parent / "models"))
+    model_dir = model_root / f"regressor_{run_stamp}"
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    model_path = model_dir / "model.pkl"
+    with open(model_path, "wb") as f:
+        dill.dump(forecaster, f)
+
+    figure_paths = {}
+    if visualization:
+        figure_paths = plot_forecaster_evaluation_examples(
+            forecaster=forecaster,
+            dataset=dataset,
+            output_dir=model_dir / "figures",
+            output_species=hyperparams.get("output_species", "F"),
+            random_state=random_state,
+        )
+
+    model_config_dump = {
+        "created_at": run_stamp,
+        "model_type": "regressor",
+        "model_file": str(model_path),
+        "model_hyperparameters": _json_safe(hyperparams),
+        "metrics": _json_safe(metrics),
+        "data": {
+            "simulation_files": [str(path) for path in paths],
+            "simulation_configs": _json_safe(run_configs),
+            "train_sequences": len(dataset["train_sequences"]),
+            "validation_sequences": len(dataset["validation_sequences"]),
+            "train_windows": int(dataset["X_train"].shape[0]),
+            "validation_windows": int(dataset["X_validation"].shape[0])
+            if "X_validation" in dataset
+            else 0,
+        },
+        "visualization_files": {key: str(value) for key, value in figure_paths.items()},
+    }
+
+    model_config_path = model_dir / "config.json"
+    with open(model_config_path, "w") as f:
+        json.dump(model_config_dump, f, indent=2)
+
+    return {
+        "model_dir": model_dir,
+        "model_path": model_path,
+        "config_path": model_config_path,
+        "metrics": metrics,
+        "figures": figure_paths,
+        "config": model_config_dump,
+    }
+
+
 def run_training_simulation(
     root_folder,
     label=None,
@@ -311,10 +403,7 @@ def _train_and_save_model(model_config, cells, data_config, run_stamp):
 def _train_and_save_regressor(model_config, cells, data_config, run_stamp):
     from aisam.comptools.regression_forecaster import train_regression_forecaster
 
-    hyperparams = dict(model_config.get("hyperparameters", model_config.get("hyperparams", {})))
-    for key, value in model_config.items():
-        if key not in {"type", "model", "name", "model_type", "hyperparameters", "hyperparams", "output_root"}:
-            hyperparams.setdefault(key, value)
+    hyperparams = _forecaster_hyperparams_from_model_config(model_config)
 
     hyperparams.setdefault("past_feature_window", 20)
     hyperparams.setdefault("future_window", 1)
@@ -368,6 +457,65 @@ def _train_and_save_regressor(model_config, cells, data_config, run_stamp):
         "metrics": metrics,
         "config": model_config_dump,
     }
+
+
+def _forecaster_hyperparams_from_model_config(model_config):
+    hyperparams = dict(model_config.get("hyperparameters", model_config.get("hyperparams", {})))
+    excluded = {
+        "type",
+        "model",
+        "name",
+        "model_type",
+        "hyperparameters",
+        "hyperparams",
+        "output_root",
+        "visualization",
+    }
+    for key, value in model_config.items():
+        if key not in excluded:
+            hyperparams.setdefault(key, value)
+    return hyperparams
+
+
+def _coerce_simulation_paths(simulation_paths):
+    if isinstance(simulation_paths, (str, PathLike)):
+        paths = [Path(simulation_paths)]
+    else:
+        paths = [Path(path) for path in simulation_paths]
+    if not paths:
+        raise ValueError("Provide at least one simulation.pkl path.")
+    missing = [str(path) for path in paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"Simulation files not found: {missing}")
+    return paths
+
+
+def _load_and_merge_cells(paths):
+    merged = {}
+    for run_index, path in enumerate(paths):
+        with open(path, "rb") as f:
+            cells = dill.load(f)
+        for cell_id, cell in cells.items():
+            merged[f"run{run_index + 1}_cell{cell_id}"] = cell
+    return merged
+
+
+def _load_run_config_from_simulation_path(path):
+    config_path = Path(path).parent / "config.json"
+    if not config_path.exists():
+        return {}
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+
+def _sampling_from_run_config(config):
+    simulated_cells = config.get("simulated_cells", {})
+    if "sampling" in simulated_cells:
+        return simulated_cells["sampling"]
+    user_config = config.get("user_config", {})
+    if "sampling" in user_config:
+        return user_config["sampling"]
+    return None
 
 
 def _sample_interval_from_config(config):

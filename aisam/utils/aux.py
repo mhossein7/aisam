@@ -1,5 +1,4 @@
 import numpy as np
-from matplotlib import pyplot as plt
 import json
 from os import PathLike
 from pathlib import Path
@@ -47,53 +46,31 @@ def random_stim_maker(total_time,bias=[0.5,0.5]):
     return stim
 
 def plot_w_bckgrnd(mega_res,stim_vec_tot,t_max,species = 'F',sampling=10,line_color= 'b',save=None,axes = False,ax_out=None):
-    '''
-    mega_res: dictionary with all cell simulation results
-    stim_vec_tot: list of arrays of stims in the form of 1 and 0 for the whole history of simulation
-    t_max: total time of each simulation 
-    sampling: data sampling during simulation (default = 10) 
-    save: a dictionary with information about saving the figure. Default is None which causes only showing the figure
-    '''
-    if ax_out is not None: 
-        ax = ax_out
-        
-    else: 
-        fig, ax = plt.subplots(figsize=(8, 4))
-    
-    for j in range(len(stim_vec_tot)):
-        for i, val in enumerate(stim_vec_tot[j]):
-            x_start = j*t_max*sampling + i * 5*sampling
-            x_end = x_start + 5*sampling
-            color = 'green' if val == 1 else 'red'
-            ax.axvspan(x_start, x_end, facecolor=color, alpha=0.2)
-    for k in range(len(mega_res.keys())):
-        results = mega_res[f'cell {k+1}']
-        for i in range(len(results)):
-            ax.plot(np.arange(t_max*i*sampling,t_max*(i+1)*sampling),(results[i][species]),color=line_color,linewidth = 0.5)
+    from aisam.utils.visualization_tools import plot_w_bckgrnd as _plot_w_bckgrnd
 
-    if save is not None:
-        path = save['path']
-        fig.savefig(path,dpi=300,format = 'svg')
-        
-    elif axes == True:
-        ax.set_xlabel('Time (min)')
-        ax.set_ylabel('GFP (molecule count)')
-        return ax
-    
-    else:    
-        ax.set_xlabel('Time (min)')
-        ax.set_ylabel('GFP (molecule count)')
-        plt.tight_layout()
-        plt.show()  
+    return _plot_w_bckgrnd(
+        mega_res,
+        stim_vec_tot,
+        t_max,
+        species=species,
+        sampling=sampling,
+        line_color=line_color,
+        save=save,
+        axes=axes,
+        ax_out=ax_out,
+    )
         
         
 def background_plotter(ax,stim_vec,sampling = 10, stim_period=5,averaged=False):
-    if averaged: sampling = 1
-    for i, val in enumerate(stim_vec):
-            x_start =  sampling*i * stim_period
-            x_end = x_start + sampling*stim_period
-            color = 'green' if val == 1 else 'red'
-            ax.axvspan(x_start, x_end, facecolor=color, alpha=0.2)
+    from aisam.utils.visualization_tools import background_plotter as _background_plotter
+
+    return _background_plotter(
+        ax,
+        stim_vec,
+        sampling=sampling,
+        stim_period=stim_period,
+        averaged=averaged,
+    )
             
 def save_params(params,address):
     with open(address+'simulation_params.json', 'w') as f:
