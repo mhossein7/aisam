@@ -88,14 +88,11 @@ def train_forecaster_from_simulation(
     hyperparams.setdefault("past_feature_window", 20)
     hyperparams.setdefault("future_window", 1)
     hyperparams.setdefault("output_species", "F")
-    hyperparams.setdefault("sampling", _sampling_from_run_config(first_config))
-    sample_interval = _sample_interval_from_config(first_config.get("user_config", {}))
-    if sample_interval is not None:
-        hyperparams.setdefault("sample_interval_minutes", sample_interval)
     if random_state is not None:
         hyperparams.setdefault("random_state", random_state)
 
     forecaster, metrics, dataset = train_regression_forecaster(cells, **hyperparams)
+    _assign_saved_sampling_metadata(forecaster, first_config)
 
     model_root = Path(output_root or model_config.get("output_root") or (paths[0].parent / "models"))
     model_dir = model_root / f"regressor_{run_stamp}"
@@ -131,6 +128,163 @@ def train_forecaster_from_simulation(
             if "X_validation" in dataset
             else 0,
         },
+        "visualization_files": {key: str(value) for key, value in figure_paths.items()},
+    }
+
+    model_config_path = model_dir / "config.json"
+    with open(model_config_path, "w") as f:
+        json.dump(model_config_dump, f, indent=2)
+
+    return {
+        "model_dir": model_dir,
+        "model_path": model_path,
+        "config_path": model_config_path,
+        "metrics": metrics,
+        "figures": figure_paths,
+        "config": model_config_dump,
+    }
+
+
+def train_forecaster_random_stim_eval(
+    source,
+    model=None,
+    output_root=None,
+    visualization=False,
+    random_state=None,
+    **simulation_kwargs,
+):
+    """
+    Train a forecaster on random-stim cells and evaluate on random holdout plus
+    repetitive-stim cells.
+
+    `source` can be one simulation.pkl path, multiple simulation.pkl paths, or a
+    normal simulation config/root-folder input. Non-pkl sources trigger a fresh
+    standard simulation before forecaster training.
+    """
+    from aisam.comptools.regression_forecaster import (
+        RegressionForecaster,
+        make_window_dataset,
+        regression_metrics,
+        split_sequences_by_cell,
+    )
+    from aisam.utils.visualization_tools import plot_forecaster_evaluation_examples
+
+    run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    model_config = _resolve_model_config(model or {"type": "regressor"})
+    model_type = str(model_config["type"]).lower()
+    if model_type not in {"regressor", "regression", "regression_forecaster"}:
+        raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
+
+    if _is_simulation_path_source(source):
+        paths = _coerce_simulation_paths(source)
+        random_sequences, repetitive_sequences, run_configs = _sequences_by_stim_group_from_paths(
+            paths,
+            model_config=model_config,
+        )
+        default_model_root = paths[0].parent / "models"
+        simulation_result = None
+    else:
+        simulation_result = run_training_simulation(source, include_cells=True, **simulation_kwargs)
+        random_sequences, repetitive_sequences = _sequences_by_stim_group_from_cells(
+            simulation_result["cells"],
+            run_config=simulation_result["config"],
+            run_prefix="standard",
+            model_config=model_config,
+        )
+        run_configs = [simulation_result["config"]]
+        default_model_root = Path(simulation_result["simulation_path"]).parent / "models"
+        simulation_result.pop("cells", None)
+
+    if not random_sequences:
+        raise ValueError("No random-stim sequences were found for forecaster training.")
+    if not repetitive_sequences:
+        raise ValueError("No repetitive-stim sequences were found for forecaster evaluation.")
+
+    hyperparams = _forecaster_hyperparams_from_model_config(model_config)
+    hyperparams.setdefault("past_feature_window", 20)
+    hyperparams.setdefault("future_window", 1)
+    hyperparams.setdefault("output_species", "F")
+    if random_state is not None:
+        hyperparams.setdefault("random_state", random_state)
+    validation_fraction = float(hyperparams.get("validation_fraction", 0.2))
+    if validation_fraction <= 0 or validation_fraction >= 1:
+        raise ValueError("validation_fraction must be in the range (0, 1) for random-stim holdout evaluation.")
+
+    train_random_sequences, holdout_random_sequences = split_sequences_by_cell(
+        random_sequences,
+        validation_fraction=validation_fraction,
+        random_state=hyperparams.get("random_state"),
+    )
+    evaluation_sequences = holdout_random_sequences + repetitive_sequences
+    window_args = _window_args_from_hyperparams(hyperparams)
+    X_train, y_train, train_meta = make_window_dataset(train_random_sequences, **window_args)
+    X_eval, y_eval, eval_meta = make_window_dataset(evaluation_sequences, **window_args)
+
+    forecaster = RegressionForecaster(
+        past_feature_window=window_args["past_feature_window"],
+        future_window=window_args["future_window"],
+        past_input_window=window_args["past_input_window"],
+        future_input_window=window_args["future_input_window"],
+        regressor=hyperparams.get("regressor"),
+        normalize=hyperparams.get("normalize", True),
+    )
+    forecaster.fit(X_train, y_train)
+    eval_predictions = forecaster.predict(X_eval)
+    metrics = {
+        "train_random_stims": forecaster.evaluate(X_train, y_train),
+        "random_holdout_plus_repetitive_evaluation": regression_metrics(y_eval, eval_predictions),
+    }
+    first_config = next((cfg for cfg in run_configs if cfg), {})
+    _assign_saved_sampling_metadata(forecaster, first_config)
+
+    dataset = {
+        "X_train": X_train,
+        "y_train": y_train,
+        "train_meta": train_meta,
+        "train_sequences": train_random_sequences,
+        "validation_sequences": evaluation_sequences,
+        "X_validation": X_eval,
+        "y_validation": y_eval,
+        "validation_meta": eval_meta,
+        "validation_predictions": eval_predictions,
+    }
+
+    model_root = Path(output_root or model_config.get("output_root") or default_model_root)
+    model_dir = model_root / f"random_stim_regressor_{run_stamp}"
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    model_path = model_dir / "model.pkl"
+    with open(model_path, "wb") as f:
+        dill.dump(forecaster, f)
+
+    figure_paths = {}
+    if visualization:
+        figure_paths = plot_forecaster_evaluation_examples(
+            forecaster=forecaster,
+            dataset=dataset,
+            output_dir=model_dir / "figures",
+            output_species=hyperparams.get("output_species", "F"),
+            random_state=random_state,
+        )
+
+    model_config_dump = {
+        "created_at": run_stamp,
+        "model_type": "random_stim_regressor",
+        "model_file": str(model_path),
+        "model_hyperparameters": _json_safe(hyperparams),
+        "metrics": _json_safe(metrics),
+        "data": {
+            "training_policy": "random_stim_cells_train_split_only",
+            "evaluation_policy": "random_stim_holdout_plus_all_repetitive_stim_cells",
+            "simulation_configs": _json_safe(run_configs),
+            "random_train_sequences": len(train_random_sequences),
+            "random_holdout_sequences": len(holdout_random_sequences),
+            "repetitive_eval_sequences": len(repetitive_sequences),
+            "total_evaluation_sequences": len(evaluation_sequences),
+            "train_windows": int(X_train.shape[0]),
+            "evaluation_windows": int(X_eval.shape[0]),
+        },
+        "simulation_result": _json_safe(simulation_result) if simulation_result else None,
         "visualization_files": {key: str(value) for key, value in figure_paths.items()},
     }
 
@@ -216,6 +370,7 @@ def run_training_simulation(
     sampling = int(config.get("sampling", params.get("sampling", 10)))
     num_realizations = int(config.get("num_realizations", 1))
     progress = bool(config.get("progress", True))
+    sample_interval = _sample_interval_from_config(config)
     params.setdefault("t_max", t_max)
     params.setdefault("sampling", sampling)
 
@@ -223,7 +378,7 @@ def run_training_simulation(
     if random_seed is not None:
         np.random.seed(int(random_seed))
 
-    stims = build_standard_stims(t_max, total_cells=total_cells)
+    stims = build_standard_stims(t_max, total_cells=total_cells, sample_interval_minutes=sample_interval)
     run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_root = _resolve_training_data_root(
         config=config,
@@ -247,6 +402,7 @@ def run_training_simulation(
         user_config=config,
         progress=progress,
         desc=f"{label} standard simulation",
+        sample_interval_minutes=sample_interval,
     )
 
     result = {
@@ -288,6 +444,7 @@ def run_training_simulation(
                 parent_run_dir=run_dir,
                 progress=progress,
                 desc=f"{label} noisy simulation {i}/{noisy_count}",
+                sample_interval_minutes=sample_interval,
             )
             noisy_result.pop("cells", None)
             result["noisy"].append(noisy_result)
@@ -295,25 +452,28 @@ def run_training_simulation(
     return result
 
 
-def build_standard_stims(total_time, total_cells=1000):
+def build_standard_stims(total_time, total_cells=1000, sample_interval_minutes=None):
     total_cells = _validate_total_cells(total_cells)
     random_cells = total_cells - 100
     red_first_start = random_cells + 1
     green_first_start = random_cells + 51
+    stim_points = int(total_time)
+    if sample_interval_minutes is not None:
+        stim_points = int(total_time / sample_interval_minutes)
 
     stims = {}
     for i in range(1, random_cells + 1):
-        stims[f"cell {i}"] = aux.random_stim_maker(total_time).tolist()
+        stims[f"cell {i}"] = aux.random_stim_maker(stim_points).tolist()
     for i in range(red_first_start, green_first_start):
         stims[f"cell {i}"] = aux.repetitive_stim_maker(
-            num_repeat=4,
-            total_time=total_time,
+            num_repeat=i-random_cells,
+            total_time=stim_points,
             off_first=True,
         ).tolist()
     for i in range(green_first_start, total_cells + 1):
         stims[f"cell {i}"] = aux.repetitive_stim_maker(
-            num_repeat=4,
-            total_time=total_time,
+            num_repeat=i-(random_cells+50),
+            total_time=stim_points,
             off_first=False,
         ).tolist()
     return stims
@@ -408,12 +568,9 @@ def _train_and_save_regressor(model_config, cells, data_config, run_stamp):
     hyperparams.setdefault("past_feature_window", 20)
     hyperparams.setdefault("future_window", 1)
     hyperparams.setdefault("output_species", "F")
-    hyperparams.setdefault("sampling", data_config["simulated_cells"]["sampling"])
-    sample_interval = _sample_interval_from_config(data_config.get("user_config", {}))
-    if sample_interval is not None:
-        hyperparams.setdefault("sample_interval_minutes", sample_interval)
 
     forecaster, metrics, dataset = train_regression_forecaster(cells, **hyperparams)
+    _assign_saved_sampling_metadata(forecaster, data_config)
 
     model_root = Path(
         model_config.get(
@@ -470,6 +627,12 @@ def _forecaster_hyperparams_from_model_config(model_config):
         "hyperparams",
         "output_root",
         "visualization",
+        "sampling",
+        "sample_interval_minutes",
+        "training_sample_interval_minutes",
+        "forecaster_sample_interval_minutes",
+        "sample_rate_minutes",
+        "interval_rate",
     }
     for key, value in model_config.items():
         if key not in excluded:
@@ -518,6 +681,168 @@ def _sampling_from_run_config(config):
     return None
 
 
+def _is_simulation_path_source(source):
+    if isinstance(source, (str, PathLike)):
+        return Path(source).suffix == ".pkl"
+    if isinstance(source, (list, tuple)):
+        return all(Path(path).suffix == ".pkl" for path in source)
+    return False
+
+
+def _sequences_by_stim_group_from_paths(paths, model_config):
+    random_sequences = []
+    repetitive_sequences = []
+    run_configs = []
+
+    for run_index, path in enumerate(paths):
+        with open(path, "rb") as f:
+            cells = dill.load(f)
+        run_config = _load_run_config_from_simulation_path(path)
+        run_configs.append(run_config)
+        run_random, run_repetitive = _sequences_by_stim_group_from_cells(
+            cells,
+            run_config=run_config,
+            run_prefix=f"run{run_index + 1}",
+            model_config=model_config,
+        )
+        random_sequences.extend(run_random)
+        repetitive_sequences.extend(run_repetitive)
+
+    return random_sequences, repetitive_sequences, run_configs
+
+
+def _sequences_by_stim_group_from_cells(cells, run_config, run_prefix, model_config):
+    from aisam.comptools.regression_forecaster import cells_to_sequences
+
+    hyperparams = _forecaster_hyperparams_from_model_config(model_config)
+    feature_species = hyperparams.get("feature_species")
+    output_species = hyperparams.get("output_species", "F")
+    random_range, red_range, green_range = _stim_ranges_from_run_config(run_config, cells)
+
+    random_cells = {}
+    repetitive_cells = {}
+    for cell_id, cell in cells.items():
+        numeric_id = _numeric_cell_id(cell_id)
+        prefixed_id = f"{run_prefix}_cell{cell_id}"
+        if _id_in_range(numeric_id, random_range):
+            random_cells[prefixed_id] = cell
+        elif _id_in_range(numeric_id, red_range) or _id_in_range(numeric_id, green_range):
+            repetitive_cells[prefixed_id] = cell
+
+    random_sequences = cells_to_sequences(
+        random_cells,
+        feature_species=feature_species,
+        output_species=output_species,
+    )
+    repetitive_sequences = cells_to_sequences(
+        repetitive_cells,
+        feature_species=feature_species,
+        output_species=output_species,
+    )
+    return random_sequences, repetitive_sequences
+
+
+def _stim_ranges_from_run_config(run_config, cells):
+    simulated_cells = run_config.get("simulated_cells", {})
+    total_cells = simulated_cells.get("total_cells")
+    if total_cells is None:
+        total_cells = len(cells)
+    fallback = stimulation_cell_ranges(total_cells)
+    return (
+        simulated_cells.get("random_stimulation_cells", fallback["random_stimulation_cells"]),
+        simulated_cells.get(
+            "repetitive_stimulation_cells_red_first",
+            fallback["repetitive_stimulation_cells_red_first"],
+        ),
+        simulated_cells.get(
+            "repetitive_stimulation_cells_green_first",
+            fallback["repetitive_stimulation_cells_green_first"],
+        ),
+    )
+
+
+def _numeric_cell_id(cell_id):
+    try:
+        return int(cell_id)
+    except (TypeError, ValueError):
+        digits = "".join(ch for ch in str(cell_id) if ch.isdigit())
+        if not digits:
+            raise ValueError(f"Cannot infer numeric cell id from {cell_id!r}.")
+        return int(digits)
+
+
+def _id_in_range(cell_id, cell_range):
+    if cell_range is None:
+        return False
+    start, end = cell_range
+    return int(start) <= int(cell_id) <= int(end)
+
+
+def _window_args_from_hyperparams(hyperparams):
+    return {
+        "past_feature_window": hyperparams["past_feature_window"],
+        "future_window": hyperparams["future_window"],
+        "past_input_window": hyperparams.get("past_input_window"),
+        "future_input_window": hyperparams.get("future_input_window"),
+        "stride": hyperparams.get("stride", 1),
+    }
+
+
+def _assign_saved_sampling_metadata(forecaster, run_config):
+    simulated_cells = run_config.get("simulated_cells", {})
+    sample_interval = simulated_cells.get("sample_interval_minutes")
+    if sample_interval is None:
+        sample_interval = _sample_interval_from_config(run_config.get("user_config", {}))
+    forecaster.sample_interval_minutes = sample_interval
+    forecaster.sampling = simulated_cells.get("saved_sampling", simulated_cells.get("sampling"))
+
+
+def _sample_cells_at_interval(cells, simulation_sampling, interval_minutes):
+    if interval_minutes is None:
+        return simulation_sampling
+
+    step = max(1, int(round(float(simulation_sampling) * float(interval_minutes))))
+    saved_sampling = 1.0 / float(interval_minutes)
+
+    for cell in cells.values():
+        for run_index, stim_vec in enumerate(cell.stims):
+            trace_length = _cell_run_trace_length(cell, run_index)
+            indices = np.arange(0, trace_length, step)
+            dense_input = _expand_stim_to_trace(stim_vec, trace_length)
+            cell.stims[run_index] = dense_input[indices].reshape(-1).tolist()
+
+            for species in cell.expressions:
+                trace = np.asarray(cell.expressions[species][run_index])
+                if trace.ndim == 1:
+                    sampled_trace = trace[indices]
+                elif trace.ndim == 2:
+                    sampled_trace = trace[:, indices]
+                else:
+                    raise ValueError(
+                        f"Expected 1D or 2D expression trace for {species!r}, got shape {trace.shape}."
+                    )
+                cell.expressions[species][run_index] = sampled_trace
+
+    return saved_sampling
+
+
+def _cell_run_trace_length(cell, run_index):
+    for species in cell.expressions:
+        trace = np.asarray(cell.expressions[species][run_index])
+        if trace.ndim == 1:
+            return trace.shape[0]
+        if trace.ndim == 2:
+            return trace.shape[1]
+    raise ValueError("Cell has no expression traces to sample.")
+
+
+def _expand_stim_to_trace(stim_vec, trace_length):
+    stim = np.asarray(stim_vec, dtype=float).reshape(-1, 1)
+    repeats = int(np.ceil(trace_length / len(stim)))
+    expanded = np.repeat(stim, repeats, axis=0)
+    return expanded[:trace_length]
+
+
 def _sample_interval_from_config(config):
     for key in (
         "sample_interval_minutes",
@@ -546,6 +871,7 @@ def _run_and_save_simulation(
     parent_run_dir=None,
     progress=True,
     desc=None,
+    sample_interval_minutes=None,
 ):
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -553,6 +879,11 @@ def _run_and_save_simulation(
     xpt = sims.experiment(params, label)
     xpt.init_exp(num_cells)
     xpt.run_training_sim(stims, num_realizations, progress=progress, desc=desc)
+    saved_sampling = _sample_cells_at_interval(
+        xpt.Cells,
+        simulation_sampling=sampling,
+        interval_minutes=sample_interval_minutes,
+    )
 
     simulation_path = run_dir / "simulation.pkl"
     with open(simulation_path, "wb") as f:
@@ -579,6 +910,8 @@ def _run_and_save_simulation(
             "num_realizations": num_realizations,
             "t_max": t_max,
             "sampling": sampling,
+            "saved_sampling": saved_sampling,
+            "sample_interval_minutes": sample_interval_minutes,
         },
         "user_config": _json_safe(user_config),
     }
