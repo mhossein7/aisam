@@ -27,7 +27,7 @@ def plot_w_bckgrnd(
             x_start = j * t_max * sampling + i * 5 * sampling
             x_end = x_start + 5 * sampling
             color = "green" if val == 1 else "red"
-            ax.axvspan(x_start, x_end, facecolor=color, alpha=0.2)
+            _input_span(ax, x_start, x_end, color=color, alpha=0.2)
 
     for k in range(len(mega_res.keys())):
         results = mega_res[f"cell {k+1}"]
@@ -59,7 +59,7 @@ def background_plotter(ax, stim_vec, sampling=10, stim_period=5, averaged=False)
         x_start = sampling * i * stim_period
         x_end = x_start + sampling * stim_period
         color = "green" if val == 1 else "red"
-        ax.axvspan(x_start, x_end, facecolor=color, alpha=0.2)
+        _input_span(ax, x_start, x_end, color=color, alpha=0.2)
 
 
 def plot_forecaster_window(
@@ -175,10 +175,88 @@ def plot_forecaster_evaluation_examples(
     return paths
 
 
+def plot_sanity_simulation_group(
+    cells,
+    cell_ids,
+    species,
+    save_path,
+    title,
+    sampling=10,
+):
+    """
+    Save a sanity-check panel with cells in rows and species in columns.
+    """
+    from pathlib import Path
+
+    species = [species] if isinstance(species, str) else list(species)
+    fig, axes = plt.subplots(
+        nrows=len(cell_ids),
+        ncols=len(species),
+        figsize=(4.2 * len(species), 1.45 * len(cell_ids)),
+        squeeze=False,
+        sharex=True,
+    )
+    for row, cell_id in enumerate(cell_ids):
+        cell = cells[str(cell_id)]
+        stim_vec = np.asarray(cell.stims[0], dtype=float)
+        for col, species_name in enumerate(species):
+            ax = axes[row][col]
+            traces = _traces_for_plot(cell.expressions[species_name][0])
+            x = np.arange(traces.shape[1]) / float(sampling)
+            _plot_stim_background_for_trace(ax, stim_vec, traces.shape[1], sampling)
+            for trace in traces:
+                ax.plot(x, trace, color="black", linewidth=1)
+            if row == 0:
+                ax.set_title(species_name)
+            if col == 0:
+                ax.set_ylabel(f"cell {cell_id}")
+            if row == len(cell_ids) - 1:
+                ax.set_xlabel("Time (min)")
+
+    fig.suptitle(title)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(save_path, dpi=300, format="svg")
+    plt.close(fig)
+    return save_path
+
+
 def _plot_input_background(ax, inputs, x_values, minute_step):
     if len(inputs) == 0:
         return
     half_step = minute_step / 2
     for x, val in zip(x_values, inputs):
         color = "green" if val >= 0.5 else "red"
-        ax.axvspan(x - half_step, x + half_step, facecolor=color, alpha=0.16, linewidth=0)
+        _input_span(ax, x - half_step, x + half_step, color=color, alpha=0.16)
+
+
+def _plot_stim_background_for_trace(ax, stim_vec, trace_length, sampling):
+    if len(stim_vec) == 0:
+        return
+    minutes_per_stim = trace_length / float(sampling * len(stim_vec))
+    for i, val in enumerate(stim_vec):
+        color = "green" if val >= 0.5 else "red"
+        _input_span(ax, i * minutes_per_stim, (i + 1) * minutes_per_stim, color=color, alpha=0.16)
+
+
+def _traces_for_plot(trace):
+    trace = np.asarray(trace, dtype=float)
+    if trace.ndim == 1:
+        return trace.reshape(1, -1)
+    if trace.ndim == 2:
+        if trace.shape[0] <= 5:
+            return trace
+        return trace.mean(axis=0).reshape(1, -1)
+    raise ValueError(f"Expected 1D or 2D trace, got shape {trace.shape}.")
+
+
+def _input_span(ax, x_start, x_end, color, alpha):
+    ax.axvspan(
+        x_start,
+        x_end,
+        facecolor=color,
+        edgecolor=color,
+        alpha=alpha,
+        linewidth=0,
+    )

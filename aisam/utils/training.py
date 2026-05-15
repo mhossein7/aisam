@@ -150,12 +150,13 @@ def train_forecaster_random_stim_eval(
     model=None,
     output_root=None,
     visualization=False,
+    include_repetitive_eval=True,
     random_state=None,
     **simulation_kwargs,
 ):
     """
     Train a forecaster on random-stim cells and evaluate on random holdout plus
-    repetitive-stim cells.
+    optional repetitive-stim cells.
 
     `source` can be one simulation.pkl path, multiple simulation.pkl paths, or a
     normal simulation config/root-folder input. Non-pkl sources trigger a fresh
@@ -184,6 +185,8 @@ def train_forecaster_random_stim_eval(
         default_model_root = paths[0].parent / "models"
         simulation_result = None
     else:
+        if not include_repetitive_eval:
+            simulation_kwargs.setdefault("include_repetitive_stims", False)
         simulation_result = run_training_simulation(source, include_cells=True, **simulation_kwargs)
         random_sequences, repetitive_sequences = _sequences_by_stim_group_from_cells(
             simulation_result["cells"],
@@ -197,7 +200,7 @@ def train_forecaster_random_stim_eval(
 
     if not random_sequences:
         raise ValueError("No random-stim sequences were found for forecaster training.")
-    if not repetitive_sequences:
+    if include_repetitive_eval and not repetitive_sequences:
         raise ValueError("No repetitive-stim sequences were found for forecaster evaluation.")
 
     hyperparams = _forecaster_hyperparams_from_model_config(model_config)
@@ -215,7 +218,9 @@ def train_forecaster_random_stim_eval(
         validation_fraction=validation_fraction,
         random_state=hyperparams.get("random_state"),
     )
-    evaluation_sequences = holdout_random_sequences + repetitive_sequences
+    evaluation_sequences = list(holdout_random_sequences)
+    if include_repetitive_eval:
+        evaluation_sequences.extend(repetitive_sequences)
     window_args = _window_args_from_hyperparams(hyperparams)
     X_train, y_train, train_meta = make_window_dataset(train_random_sequences, **window_args)
     X_eval, y_eval, eval_meta = make_window_dataset(evaluation_sequences, **window_args)
@@ -232,7 +237,9 @@ def train_forecaster_random_stim_eval(
     eval_predictions = forecaster.predict(X_eval)
     metrics = {
         "train_random_stims": forecaster.evaluate(X_train, y_train),
-        "random_holdout_plus_repetitive_evaluation": regression_metrics(y_eval, eval_predictions),
+        "random_holdout_plus_repetitive_evaluation"
+        if include_repetitive_eval
+        else "random_holdout_evaluation": regression_metrics(y_eval, eval_predictions),
     }
     first_config = next((cfg for cfg in run_configs if cfg), {})
     _assign_saved_sampling_metadata(forecaster, first_config)
@@ -275,11 +282,15 @@ def train_forecaster_random_stim_eval(
         "metrics": _json_safe(metrics),
         "data": {
             "training_policy": "random_stim_cells_train_split_only",
-            "evaluation_policy": "random_stim_holdout_plus_all_repetitive_stim_cells",
+            "evaluation_policy": "random_stim_holdout_plus_all_repetitive_stim_cells"
+            if include_repetitive_eval
+            else "random_stim_holdout_only",
+            "include_repetitive_eval": include_repetitive_eval,
             "simulation_configs": _json_safe(run_configs),
             "random_train_sequences": len(train_random_sequences),
             "random_holdout_sequences": len(holdout_random_sequences),
-            "repetitive_eval_sequences": len(repetitive_sequences),
+            "available_repetitive_sequences": len(repetitive_sequences),
+            "repetitive_eval_sequences": len(repetitive_sequences) if include_repetitive_eval else 0,
             "total_evaluation_sequences": len(evaluation_sequences),
             "train_windows": int(X_train.shape[0]),
             "evaluation_windows": int(X_eval.shape[0]),
@@ -302,6 +313,91 @@ def train_forecaster_random_stim_eval(
     }
 
 
+def run_sanity_check_simulation(config, species=None, num_realizations=None, progress=True):
+    """
+    Run a 30-cell sanity-check simulation and save random/periodic panels.
+
+    The panel contains 10 random-stim cells, 10 green-first periodic cells with
+    num_repeat 1..10, and 10 red-first periodic cells with num_repeat 1..10.
+    """
+    from aisam.utils.visualization_tools import plot_sanity_simulation_group
+
+    config, source_root, _ = _load_simulation_config_from_root(config)
+    params = _load_params_from_config(config, source_root=source_root)
+    label = config.get("label", config.get("circuit", "CcaSR"))
+    t_max = int(config.get("t_max", params.get("t_max")))
+    sampling = int(config.get("sampling", params.get("sampling", 10)))
+    sample_interval = _sample_interval_from_config(config)
+    stim_points = _stim_points_for_interval(t_max, sample_interval)
+    params.setdefault("t_max", t_max)
+    params.setdefault("sampling", sampling)
+    num_realizations = int(num_realizations or config.get("num_realizations", 1))
+    species = species or config.get("sanity_species", ["F"])
+    species = [species] if isinstance(species, str) else list(species)
+
+    stims = {}
+    for i in range(1, 11):
+        stims[f"cell {i}"] = aux.random_stim_maker(stim_points).tolist()
+    for repeat in range(1, 11):
+        stims[f"cell {10 + repeat}"] = aux.repetitive_stim_maker(
+            num_repeat=repeat,
+            total_time=stim_points,
+            off_first=False,
+        ).tolist()
+        stims[f"cell {20 + repeat}"] = aux.repetitive_stim_maker(
+            num_repeat=repeat,
+            total_time=stim_points,
+            off_first=True,
+        ).tolist()
+
+    xpt = sims.experiment(params, label)
+    xpt.init_exp(30)
+    xpt.run_training_sim(stims, num_realizations, progress=progress, desc=f"{label} sanity check")
+    saved_sampling = _sample_cells_at_interval(
+        xpt.Cells,
+        simulation_sampling=sampling,
+        interval_minutes=sample_interval,
+    )
+
+    root = Path(config.get("root_folder", source_root or dated_assets_root()))
+    output_dir = root / "sanity_plots"
+    figure_paths = {
+        "random_stims": plot_sanity_simulation_group(
+            xpt.Cells,
+            cell_ids=range(1, 11),
+            species=species,
+            save_path=output_dir / "random_stims.svg",
+            title="random_stims",
+            sampling=saved_sampling,
+        ),
+        "periodic_green_first": plot_sanity_simulation_group(
+            xpt.Cells,
+            cell_ids=range(11, 21),
+            species=species,
+            save_path=output_dir / "periodic_green_first.svg",
+            title="periodic_green_first",
+            sampling=saved_sampling,
+        ),
+        "periodic_red_first": plot_sanity_simulation_group(
+            xpt.Cells,
+            cell_ids=range(21, 31),
+            species=species,
+            save_path=output_dir / "periodic_red_first.svg",
+            title="periodic_red_first",
+            sampling=saved_sampling,
+        ),
+    }
+
+    return {
+        "output_dir": output_dir,
+        "figures": figure_paths,
+        "cells": xpt.Cells,
+        "stims": stims,
+        "saved_sampling": saved_sampling,
+        "sample_interval_minutes": sample_interval,
+    }
+
+
 def run_training_simulation(
     root_folder,
     label=None,
@@ -311,6 +407,7 @@ def run_training_simulation(
     temperatures=None,
     output_root=None,
     random_seed=None,
+    include_repetitive_stims=None,
     include_cells=False,
 ):
     """
@@ -345,6 +442,8 @@ def run_training_simulation(
         config["output_root"] = str(output_root)
     if random_seed is not None:
         config["random_seed"] = random_seed
+    if include_repetitive_stims is not None:
+        config["include_repetitive_stims"] = include_repetitive_stims
     if total_cell is not None:
         config["total_cell"] = total_cell
     if noisy_sims is not None:
@@ -371,6 +470,7 @@ def run_training_simulation(
     num_realizations = int(config.get("num_realizations", 1))
     progress = bool(config.get("progress", True))
     sample_interval = _sample_interval_from_config(config)
+    include_repetitive_stims = bool(config.get("include_repetitive_stims", True))
     params.setdefault("t_max", t_max)
     params.setdefault("sampling", sampling)
 
@@ -378,7 +478,12 @@ def run_training_simulation(
     if random_seed is not None:
         np.random.seed(int(random_seed))
 
-    stims = build_standard_stims(t_max, total_cells=total_cells, sample_interval_minutes=sample_interval)
+    stims = build_standard_stims(
+        t_max,
+        total_cells=total_cells,
+        sample_interval_minutes=sample_interval,
+        include_repetitive_stims=include_repetitive_stims,
+    )
     run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_root = _resolve_training_data_root(
         config=config,
@@ -418,7 +523,12 @@ def run_training_simulation(
 
     noisy_count = int(config.get("noisy_sims", 0))
     if noisy_count > 0:
-        noisy_stims = build_standard_stims(t_max, total_cells=noisy_total_cells)
+        noisy_stims = build_standard_stims(
+            t_max,
+            total_cells=noisy_total_cells,
+            sample_interval_minutes=sample_interval,
+            include_repetitive_stims=include_repetitive_stims,
+        )
         temp_schedule = assign_temperatures(
             noisy_count,
             config.get("temperatures", [0.1]),
@@ -452,30 +562,34 @@ def run_training_simulation(
     return result
 
 
-def build_standard_stims(total_time, total_cells=1000, sample_interval_minutes=None):
+def build_standard_stims(
+    total_time,
+    total_cells=1000,
+    sample_interval_minutes=None,
+    include_repetitive_stims=True,
+):
     total_cells = _validate_total_cells(total_cells)
-    random_cells = total_cells - 100
+    random_cells = total_cells - 100 if include_repetitive_stims else total_cells
     red_first_start = random_cells + 1
     green_first_start = random_cells + 51
-    stim_points = int(total_time)
-    if sample_interval_minutes is not None:
-        stim_points = int(total_time / sample_interval_minutes)
+    stim_points = _stim_points_for_interval(total_time, sample_interval_minutes)
 
     stims = {}
     for i in range(1, random_cells + 1):
         stims[f"cell {i}"] = aux.random_stim_maker(stim_points).tolist()
-    for i in range(red_first_start, green_first_start):
-        stims[f"cell {i}"] = aux.repetitive_stim_maker(
-            num_repeat=i-random_cells,
-            total_time=stim_points,
-            off_first=True,
-        ).tolist()
-    for i in range(green_first_start, total_cells + 1):
-        stims[f"cell {i}"] = aux.repetitive_stim_maker(
-            num_repeat=i-(random_cells+50),
-            total_time=stim_points,
-            off_first=False,
-        ).tolist()
+    if include_repetitive_stims:
+        for i in range(red_first_start, green_first_start):
+            stims[f"cell {i}"] = aux.repetitive_stim_maker(
+                num_repeat=i - random_cells,
+                total_time=stim_points,
+                off_first=True,
+            ).tolist()
+        for i in range(green_first_start, total_cells + 1):
+            stims[f"cell {i}"] = aux.repetitive_stim_maker(
+                num_repeat=i - (random_cells + 50),
+                total_time=stim_points,
+                off_first=False,
+            ).tolist()
     return stims
 
 
@@ -494,14 +608,16 @@ def assign_temperatures(num_sims, temperatures):
     return assigned
 
 
-def stimulation_cell_ranges(total_cells):
+def stimulation_cell_ranges(total_cells, include_repetitive_stims=True):
     total_cells = _validate_total_cells(total_cells)
-    random_cells = total_cells - 100
+    random_cells = total_cells - 100 if include_repetitive_stims else total_cells
+    red_range = [random_cells + 1, random_cells + 50] if include_repetitive_stims else []
+    green_range = [random_cells + 51, total_cells] if include_repetitive_stims else []
     return {
         "total_cells": total_cells,
         "random_stimulation_cells": [1, random_cells],
-        "repetitive_stimulation_cells_red_first": [random_cells + 1, random_cells + 50],
-        "repetitive_stimulation_cells_green_first": [random_cells + 51, total_cells],
+        "repetitive_stimulation_cells_red_first": red_range,
+        "repetitive_stimulation_cells_green_first": green_range,
     }
 
 
@@ -774,6 +890,8 @@ def _numeric_cell_id(cell_id):
 def _id_in_range(cell_id, cell_range):
     if cell_range is None:
         return False
+    if len(cell_range) != 2:
+        return False
     start, end = cell_range
     return int(start) <= int(cell_id) <= int(end)
 
@@ -824,6 +942,12 @@ def _sample_cells_at_interval(cells, simulation_sampling, interval_minutes):
                 cell.expressions[species][run_index] = sampled_trace
 
     return saved_sampling
+
+
+def _stim_points_for_interval(t_max, interval_minutes):
+    if interval_minutes is None:
+        return int(t_max)
+    return max(1, int(float(t_max) / float(interval_minutes)))
 
 
 def _cell_run_trace_length(cell, run_index):
@@ -906,7 +1030,11 @@ def _run_and_save_simulation(
         "simulation_params_file": str(params_path),
         "stims_file": str(stims_path),
         "simulated_cells": {
-            **stimulation_cell_ranges(num_cells),
+            **stimulation_cell_ranges(
+                num_cells,
+                include_repetitive_stims=bool(user_config.get("include_repetitive_stims", True)),
+            ),
+            "include_repetitive_stims": bool(user_config.get("include_repetitive_stims", True)),
             "num_realizations": num_realizations,
             "t_max": t_max,
             "sampling": sampling,
