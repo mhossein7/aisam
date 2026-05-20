@@ -6,7 +6,7 @@ from pathlib import Path
 import dill
 import numpy as np
 
-from aisam.model import sims
+from aisam.model import defaults, sims
 from aisam.utils import aux
 
 
@@ -54,6 +54,191 @@ def training(config, model=None, total_cell=None, noisy_total_cells=None):
 
     result.pop("cells", None)
     return result
+
+
+def run_recipe(root_folder=None, progress=None):
+    """
+    Run a complete experiment described by `recipe.json`.
+
+    The recipe is read from `root_folder` or the current working directory. If
+    `config.json` and/or `simulation_params.json` are present in the same root,
+    they override recipe/default simulation settings.
+    """
+    recipe_config = load_experiment_recipe(root_folder)
+    config = recipe_config["config"]
+    recipe = recipe_config["recipe"]
+    root = recipe_config["root_folder"]
+    if progress is not None:
+        config["progress"] = bool(progress)
+
+    result = {
+        "root_folder": root,
+        "recipe_path": recipe_config["recipe_path"],
+        "config": config,
+        "sanity": None,
+        "simulation": None,
+        "model": None,
+    }
+
+    include_sanity = _recipe_bool(recipe, "include_sanity_check", "sanity_check", default=False)
+    sanity_only = _recipe_bool(recipe, "sanity_only", "only_sanity_check", default=False)
+    include_training_simulation = _recipe_bool(
+        recipe,
+        "include_training_simulation",
+        "include_simulation",
+        "run_training_simulation",
+        default=not sanity_only,
+    )
+    include_model_training = _recipe_bool(
+        recipe,
+        "include_model_training",
+        "train_model",
+        "include_training",
+        default=False,
+    )
+
+    if include_sanity:
+        result["sanity"] = run_sanity_check_simulation(config, progress=config.get("progress", True))
+
+    if not include_training_simulation:
+        return result
+
+    simulation_result = run_training_simulation(config, include_cells=True)
+    result["simulation"] = {key: value for key, value in simulation_result.items() if key != "cells"}
+
+    if include_model_training:
+        model_config = _resolve_model_config(config.get("model", {"type": "regressor"}))
+        if model_config is None:
+            raise ValueError("Recipe requested model training but did not define a forecaster model.")
+        include_repetitive_training = bool(config.get("include_repetitive_stims_in_training", True))
+        include_repetitive_eval = bool(config.get("include_repetitive_eval", True))
+
+        if include_repetitive_training:
+            model_result = _train_and_save_model(
+                model_config=model_config,
+                cells=simulation_result["cells"],
+                data_config=simulation_result["config"],
+                run_stamp=simulation_result["run_stamp"],
+            )
+        else:
+            model_result = train_forecaster_random_stim_eval(
+                simulation_result["simulation_path"],
+                model=model_config,
+                visualization=bool(model_config.get("visualization", False)),
+                include_repetitive_eval=include_repetitive_eval,
+                random_state=config.get("random_seed"),
+            )
+        result["model"] = model_result
+
+    return result
+
+
+def load_experiment_recipe(root_folder=None):
+    """
+    Load `recipe.json` and resolve it into the standard simulation config.
+
+    Priority for simulation parameters is:
+    model defaults < recipe parameters < config.json parameters <
+    root/simulation_params.json.
+    """
+    root = _resolve_recipe_root(root_folder)
+    recipe_path = root / "recipe.json"
+    if not recipe_path.exists():
+        raise FileNotFoundError(f"No recipe.json found in {root}.")
+    with open(recipe_path, "r") as f:
+        recipe = json.load(f)
+    if not isinstance(recipe, dict):
+        raise ValueError("recipe.json must contain a JSON object.")
+
+    config_path = root / "config.json"
+    file_config = {}
+    if config_path.exists():
+        with open(config_path, "r") as f:
+            file_config = json.load(f)
+
+    recipe_base = _config_from_recipe(recipe)
+    config = {**recipe_base, **file_config}
+    config["root_folder"] = str(root)
+
+    circuit = config.get("circuit", config.get("label", recipe.get("circuit", "ccasr")))
+    circuit = defaults.normalize_circuit_name(circuit)
+    config["circuit"] = circuit
+    config.setdefault("label", circuit)
+
+    params = defaults.default_circuit_params(circuit)
+    params.update(_recipe_params(recipe))
+    file_params = file_config.get("params", file_config.get("circuit_parameters"))
+    if isinstance(file_params, dict):
+        params.update(file_params)
+
+    root_params_path = root / "simulation_params.json"
+    if root_params_path.exists():
+        params.update(aux.load_params(root_params_path))
+        config["params_path"] = str(root_params_path)
+    elif file_config.get("params_path"):
+        params_path = Path(file_config["params_path"])
+        if not params_path.is_absolute():
+            params_path = root / params_path
+        params.update(aux.load_params(params_path))
+        config["params_path"] = str(params_path)
+
+    config["params"] = params
+    config["circuit_parameters"] = params
+    config.setdefault("t_max", params.get("t_max", 960))
+    config.setdefault("sampling", params.get("sampling", 10))
+    params["t_max"] = config["t_max"]
+    params["sampling"] = config["sampling"]
+    config.setdefault("interval_rate", recipe.get("interval_rate", recipe.get("sample_interval_minutes", 5)))
+    config.setdefault("total_cell", recipe.get("total_cell", recipe.get("total_cells", recipe.get("num_cells", 1000))))
+    config.setdefault("noisy_total_cells", recipe.get("noisy_total_cells", 350))
+    config.setdefault("num_realizations", recipe.get("num_realizations", 1))
+    config.setdefault("noisy_sims", recipe.get("noisy_sims", 0))
+    config.setdefault("progress", recipe.get("progress", True))
+
+    include_periodic_training = _recipe_bool(
+        recipe,
+        "include_periodic_stims_in_training",
+        "include_repetitive_stims_in_training",
+        default=True,
+    )
+    include_periodic_validation = _recipe_bool(
+        recipe,
+        "include_periodic_stims_in_validation",
+        "include_repetitive_stims_in_validation",
+        "include_repetitive_eval",
+        default=True,
+    )
+    config.setdefault("include_repetitive_stims_in_training", include_periodic_training)
+    config.setdefault("include_repetitive_eval", include_periodic_validation)
+    config.setdefault(
+        "include_repetitive_stims",
+        bool(config["include_repetitive_stims_in_training"] or config["include_repetitive_eval"]),
+    )
+
+    simulation_model = config.get(
+        "simulation_model",
+        recipe.get("simulation_model", recipe.get("simulator", "gillespy_tau_hybrid")),
+    )
+    config["simulation_model"] = simulation_model
+    _validate_simulation_model(simulation_model)
+
+    forecaster_model = config.get(
+        "forecaster_model",
+        recipe.get(
+            "forecaster_model",
+            recipe.get("model", recipe.get("model_type", "regressor")),
+        ),
+    )
+    config["model"] = _recipe_model_config(forecaster_model, recipe)
+
+    return {
+        "root_folder": root,
+        "recipe_path": recipe_path,
+        "config_path": config_path if config_path.exists() else None,
+        "params_path": root_params_path if root_params_path.exists() else config.get("params_path"),
+        "recipe": recipe,
+        "config": config,
+    }
 
 
 def train_forecaster_from_simulation(
@@ -633,6 +818,119 @@ def _validate_total_cells(total_cells):
     if total_cells < 200:
         raise ValueError("total_cell must be at least 200.")
     return total_cells
+
+
+def _resolve_recipe_root(root_folder):
+    if root_folder is None:
+        return Path.cwd()
+    path = Path(root_folder)
+    if path.is_file():
+        if path.name != "recipe.json":
+            raise ValueError("Recipe path inputs must point to recipe.json.")
+        return path.parent
+    return path
+
+
+def _config_from_recipe(recipe):
+    config = {}
+    key_map = {
+        "circuit": ("circuit", "circuit_type", "type_of_circuit"),
+        "label": ("label", "experiment_label"),
+        "t_max": ("t_max", "duration_minutes"),
+        "sampling": ("sampling", "simulation_sampling"),
+        "interval_rate": ("interval_rate", "sample_interval_minutes", "sample_rate_minutes"),
+        "total_cell": ("total_cell", "total_cells", "num_cells"),
+        "noisy_total_cells": ("noisy_total_cells", "num_noisy_cells"),
+        "num_realizations": ("num_realizations", "num_realization"),
+        "noisy_sims": ("noisy_sims", "num_noisy_sims"),
+        "temperatures": ("temperatures", "noise_temperatures"),
+        "random_seed": ("random_seed", "seed"),
+        "progress": ("progress",),
+    }
+    for target, aliases in key_map.items():
+        value = _first_present(recipe, aliases)
+        if value is not None:
+            config[target] = value
+
+    simulation = recipe.get("simulation")
+    if isinstance(simulation, dict):
+        for key, value in simulation.items():
+            if key not in {"parameters", "params", "circuit_parameters"}:
+                config.setdefault(key, value)
+
+    return config
+
+
+def _recipe_params(recipe):
+    params = {}
+    for key in ("params", "parameters", "circuit_parameters", "simulation_params"):
+        value = recipe.get(key)
+        if isinstance(value, dict):
+            params.update(value)
+    simulation = recipe.get("simulation")
+    if isinstance(simulation, dict):
+        for key in ("params", "parameters", "circuit_parameters", "simulation_params"):
+            value = simulation.get(key)
+            if isinstance(value, dict):
+                params.update(value)
+    return params
+
+
+def _recipe_model_config(forecaster_model, recipe):
+    if forecaster_model is None or forecaster_model is False:
+        return None
+    if isinstance(forecaster_model, dict):
+        model_config = dict(forecaster_model)
+    else:
+        model_config = {"type": forecaster_model}
+
+    for key in ("model_hyperparameters", "forecaster_hyperparameters", "hyperparameters", "hyperparams"):
+        value = recipe.get(key)
+        if isinstance(value, dict):
+            model_config.setdefault("hyperparameters", {}).update(value)
+
+    visualization = _first_present(recipe, ("visualization", "include_visualization", "plot_model_performance"))
+    if visualization is not None:
+        model_config["visualization"] = bool(visualization)
+    return model_config
+
+
+def _recipe_bool(recipe, *keys, default=False):
+    value = _first_present(recipe, keys)
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _first_present(mapping, keys):
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
+
+
+def _validate_simulation_model(simulation_model):
+    model_key = str(simulation_model).strip().lower().replace(" ", "")
+    supported = {
+        "gillespy",
+        "gillespy_tau_hybrid",
+        "tau-hybrid",
+        "tauhybrid",
+        "stochastic",
+        "sde",
+        "sde+noise",
+        "sde+noise+heterogeneity",
+    }
+    if model_key in supported:
+        return
+    if model_key in {"ode", "ode+noise"}:
+        raise NotImplementedError(
+            "Recipe support is wired in, but the ODE simulation backend is not connected "
+            "to the standard training-data writer yet."
+        )
+    raise NotImplementedError(f"Simulation model {simulation_model!r} is not implemented yet.")
 
 
 def default_training_data_root():

@@ -99,6 +99,47 @@ result = training("/path/to/run_root")
 
 The standard simulation is saved under `root_folder/training_data/{label}_{timestamp}/`. If `noisy_sims` is greater than zero, noisy simulations are saved under that run folder in `noisy/sim_i/`. The forecaster model is trained only on the standard simulation data from the standard pipeline, then saved under the same run folder in `models/`.
 
+## Recipe-based experiment
+
+An entire experiment can also be defined with `recipe.json` in the run root. If the same folder also contains `config.json` or `simulation_params.json`, those files override the recipe/default simulation values.
+
+```json
+{
+  "circuit": "ccasr",
+  "simulation_model": "gillespy_tau_hybrid",
+  "forecaster_model": {
+    "type": "regressor",
+    "past_feature_window": 20,
+    "future_window": 1,
+    "output_species": "F"
+  },
+  "include_model_training": true,
+  "include_sanity_check": true,
+  "include_periodic_stims_in_training": false,
+  "include_periodic_stims_in_validation": true,
+  "t_max": 960,
+  "sampling": 10,
+  "interval_rate": 5,
+  "total_cell": 1000,
+  "num_realizations": 3,
+  "noisy_sims": 0
+}
+```
+
+Run from the recipe folder:
+
+```bash
+aisam simulate
+```
+
+Or point AISAM to another recipe root:
+
+```bash
+aisam simulate --path /path/to/run_root
+```
+
+If only `recipe.json` exists, AISAM uses default circuit parameters stored in `aisam.model.defaults`.
+
 ## Codebase dependency graph
 
 ```mermaid

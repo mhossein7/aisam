@@ -10,5 +10,8 @@ authors = [{ name = "Hossein Moghimian" }]
 readme = "README.md"
 requires-python = ">=3.8"
 
+[project.scripts]
+aisam = "aisam.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
