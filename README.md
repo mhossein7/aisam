@@ -10,7 +10,7 @@ graph TD
     noisy_opts["optional noisy settings<br/>noisy_sims<br/>temperatures"]
     model_opts["optional model settings<br/>model type<br/>past/future windows<br/>feature/output species<br/>sample_interval_minutes"]
 
-    run["training.run_training_simulation"]
+    run["simulation.run_training_simulation"]
     stims["standard stims<br/>first total_cell - 100 random<br/>next 50 repetitive red-first<br/>last 50 repetitive green-first"]
     sim["standard GillesPy simulation<br/>total_cell x num_realizations"]
     out["training_data directory<br/>root_folder/training_data<br/>or assets/yymmdd/training_data<br/>when called with only config path"]
@@ -19,7 +19,7 @@ graph TD
     noisy["optional noisy simulations<br/>sample noisy parameter dictionaries<br/>noisy_total_cells default 350<br/>250 random + 100 repetitive by default"]
     noisy_saved["noisy/sim_i folders<br/>simulation.pkl<br/>simulation_params.json<br/>stims.json<br/>config.json"]
 
-    train["optional downstream training<br/>training.training"]
+    train["optional downstream training<br/>pipeline.training"]
     preprocess["forecaster preprocessing<br/>sample input/expression traces<br/>at sample_interval_minutes"]
     model["model artifacts in run folder<br/>models/model.pkl<br/>models/config.json<br/>metrics"]
 
@@ -92,7 +92,7 @@ Example `simulation_params.json`:
 Run the full pipeline:
 
 ```python
-from aisam.utils.training import training
+from aisam.utils.pipeline import training
 
 result = training("/path/to/run_root")
 ```
@@ -149,7 +149,10 @@ graph TD
     utils_pkg[aisam.utils]
     comptools_pkg[aisam.comptools]
 
-    training_py[aisam/utils/training.py]
+    simulation_py[aisam/utils/simulation.py]
+    forecaster_py[aisam/utils/forecaster_training.py]
+    pipeline_py[aisam/utils/pipeline.py]
+    training_py[aisam/utils/training.py<br/>compatibility re-exports]
     sims_py[aisam/model/sims.py]
     models_py[aisam/model/models.py]
     aux_py[aisam/utils/aux.py]
@@ -163,9 +166,16 @@ graph TD
     dill[dill]
     json[json]
 
-    training_py --> sims_py
-    training_py --> aux_py
-    training_py --> json
+    pipeline_py --> simulation_py
+    pipeline_py --> forecaster_py
+    training_py --> pipeline_py
+    training_py --> simulation_py
+    training_py --> forecaster_py
+    simulation_py --> sims_py
+    simulation_py --> aux_py
+    simulation_py --> json
+    forecaster_py --> simulation_py
+    forecaster_py --> comptools_pkg
 
     aisam --> model_pkg
     aisam --> utils_pkg
@@ -193,7 +203,7 @@ graph TD
 
 ```mermaid
 graph TD
-    run_cli[training.run_training_simulation]
+    run_cli[simulation.run_training_simulation]
 
     load_cfg[Load config JSON]
     load_params[aux.load_params]

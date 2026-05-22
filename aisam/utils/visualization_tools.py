@@ -96,6 +96,11 @@ def plot_forecaster_window(
     x_future = np.arange(time_index, time_index + future_window) * minute_step
     x_truth = np.arange(start, time_index + future_window) * minute_step
     truth = np.concatenate([output[start:time_index], ground_truth[:future_window]])
+    x_prediction = x_future
+    prediction_trace = prediction[:future_window]
+    if time_index > start:
+        x_prediction = np.concatenate(([(time_index - 1) * minute_step], x_future))
+        prediction_trace = np.concatenate(([output[time_index - 1]], prediction_trace))
 
     fig, ax = plt.subplots(figsize=(9, 4))
     _plot_input_background(ax, inputs[start:stop], x_window, minute_step)
@@ -108,11 +113,13 @@ def plot_forecaster_window(
         label=f"{output_species} ground truth",
     )
     ax.plot(
-        x_future,
-        prediction[:future_window],
+        x_prediction,
+        prediction_trace,
         color="tab:blue",
         linewidth=1.8,
         linestyle=":",
+        marker="o" if future_window == 1 else None,
+        markersize=3,
         label="prediction",
     )
     ax.axvline(time_index * minute_step, color="0.35", linewidth=1, linestyle="--")
@@ -173,6 +180,30 @@ def plot_forecaster_evaluation_examples(
         paths[name] = save_path
 
     return paths
+
+
+def plot_error_distribution(errors, save_path, title="Error distribution"):
+    """
+    Save a histogram of per-window RMSE values.
+    """
+    from pathlib import Path
+
+    errors = np.asarray(errors, dtype=float).reshape(-1)
+    save_path = Path(save_path)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    bins = min(40, max(10, int(np.sqrt(len(errors)))))
+    ax.hist(errors, bins=bins, color="0.25", edgecolor="0.25", alpha=0.82)
+    ax.axvline(float(np.mean(errors)), color="tab:blue", linewidth=1.5, linestyle="--", label="mean")
+    ax.set_xlabel("RMSE")
+    ax.set_ylabel("count")
+    ax.set_title(title)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=300, format="svg")
+    plt.close(fig)
+    return save_path
 
 
 def plot_sanity_simulation_group(
