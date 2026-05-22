@@ -47,8 +47,6 @@ def train_forecaster_from_simulation(
             include_main_periodic=include_main_periodic,
         )
 
-    from aisam.comptools.regression_forecaster import train_regression_forecaster
-
     paths = _coerce_simulation_paths(simulation_paths)
     cells = _load_and_merge_cells(paths)
     run_configs = [_load_run_config_from_simulation_path(path) for path in paths]
@@ -56,7 +54,7 @@ def train_forecaster_from_simulation(
 
     model_config = _resolve_model_config(model or {"type": "regressor"})
     model_type = str(model_config["type"]).lower()
-    if model_type not in {"regressor", "regression", "regression_forecaster"}:
+    if not _is_supported_model_type(model_type):
         raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
 
     hyperparams = _forecaster_hyperparams_from_model_config(model_config)
@@ -67,11 +65,11 @@ def train_forecaster_from_simulation(
     if random_state is not None:
         hyperparams.setdefault("random_state", random_state)
 
-    forecaster, metrics, dataset = train_regression_forecaster(cells, **hyperparams)
+    forecaster, metrics, dataset = _train_model_from_cells(cells, model_config, hyperparams)
     _assign_saved_sampling_metadata(forecaster, first_config)
 
     model_root = Path(output_root or model_config.get("output_root") or (paths[0].parent / "models"))
-    model_dir = model_root / f"regressor_{run_stamp}"
+    model_dir = model_root / f"{model_type}_{run_stamp}"
     model_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = model_dir / "model.pkl"
@@ -97,7 +95,7 @@ def train_forecaster_from_simulation(
 
     model_config_dump = {
         "created_at": run_stamp,
-        "model_type": "regressor",
+        "model_type": model_type,
         "model_file": str(model_path),
         "model_hyperparameters": _json_safe(hyperparams),
         "metrics": _json_safe(metrics),
@@ -149,12 +147,7 @@ def train_forecaster_from_simulation_config(
     - include_noisy controls noisy-run random stim cells.
     - include_noisy_periodic controls noisy-run repetitive stim cells.
     """
-    from aisam.comptools.regression_forecaster import (
-        RegressionForecaster,
-        make_window_dataset,
-        regression_metrics,
-        split_sequences_by_cell,
-    )
+    from aisam.comptools.regression_forecaster import make_window_dataset, split_sequences_by_cell
 
     main_paths = _resolve_main_simulation_paths(path)
     noisy_paths = _discover_noisy_simulation_paths(main_paths[0])
@@ -162,7 +155,7 @@ def train_forecaster_from_simulation_config(
     if model_config is None:
         raise ValueError("A model config is required for forecaster training.")
     model_type = str(model_config["type"]).lower()
-    if model_type not in {"regressor", "regression", "regression_forecaster"}:
+    if not _is_supported_model_type(model_type):
         raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
 
     if visualization is None:
@@ -237,19 +230,12 @@ def train_forecaster_from_simulation_config(
     X_train, y_train, train_meta = make_window_dataset(train_sequences, **window_args)
     X_eval, y_eval, eval_meta = make_window_dataset(eval_sequences, **window_args)
 
-    forecaster = RegressionForecaster(
-        past_feature_window=window_args["past_feature_window"],
-        future_window=window_args["future_window"],
-        past_input_window=window_args["past_input_window"],
-        future_input_window=window_args["future_input_window"],
-        regressor=hyperparams.get("regressor"),
-        normalize=hyperparams.get("normalize", True),
-    )
+    forecaster = _build_forecaster(model_type, model_config, hyperparams, window_args, train_sequences)
     forecaster.fit(X_train, y_train)
     eval_predictions = forecaster.predict(X_eval)
     metrics = {
         "train": forecaster.evaluate(X_train, y_train),
-        "evaluation": regression_metrics(y_eval, eval_predictions),
+        "evaluation": _regression_metrics(y_eval, eval_predictions),
     }
     first_config = next((cfg for cfg in main_configs if cfg), {})
     _assign_saved_sampling_metadata(forecaster, first_config)
@@ -325,7 +311,7 @@ def train_forecaster_from_simulation_config(
 
     model_config_dump = {
         "created_at": run_stamp,
-        "model_type": "regressor",
+        "model_type": model_type,
         "model_file": str(model_path),
         "model_hyperparameters": _json_safe(hyperparams),
         "metrics": _json_safe(metrics),
@@ -383,17 +369,12 @@ def train_forecaster_random_stim_eval(
     normal simulation config/root-folder input. Non-pkl sources trigger a fresh
     standard simulation before forecaster training.
     """
-    from aisam.comptools.regression_forecaster import (
-        RegressionForecaster,
-        make_window_dataset,
-        regression_metrics,
-        split_sequences_by_cell,
-    )
+    from aisam.comptools.regression_forecaster import make_window_dataset, split_sequences_by_cell
 
     run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     model_config = _resolve_model_config(model or {"type": "regressor"})
     model_type = str(model_config["type"]).lower()
-    if model_type not in {"regressor", "regression", "regression_forecaster"}:
+    if not _is_supported_model_type(model_type):
         raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
 
     if _is_simulation_path_source(source):
@@ -445,21 +426,14 @@ def train_forecaster_random_stim_eval(
     X_train, y_train, train_meta = make_window_dataset(train_random_sequences, **window_args)
     X_eval, y_eval, eval_meta = make_window_dataset(evaluation_sequences, **window_args)
 
-    forecaster = RegressionForecaster(
-        past_feature_window=window_args["past_feature_window"],
-        future_window=window_args["future_window"],
-        past_input_window=window_args["past_input_window"],
-        future_input_window=window_args["future_input_window"],
-        regressor=hyperparams.get("regressor"),
-        normalize=hyperparams.get("normalize", True),
-    )
+    forecaster = _build_forecaster(model_type, model_config, hyperparams, window_args, train_random_sequences)
     forecaster.fit(X_train, y_train)
     eval_predictions = forecaster.predict(X_eval)
     metrics = {
         "train_random_stims": forecaster.evaluate(X_train, y_train),
         "random_holdout_plus_repetitive_evaluation"
         if include_repetitive_eval
-        else "random_holdout_evaluation": regression_metrics(y_eval, eval_predictions),
+        else "random_holdout_evaluation": _regression_metrics(y_eval, eval_predictions),
     }
     first_config = next((cfg for cfg in run_configs if cfg), {})
     _assign_saved_sampling_metadata(forecaster, first_config)
@@ -477,7 +451,7 @@ def train_forecaster_random_stim_eval(
     }
 
     model_root = Path(output_root or model_config.get("output_root") or default_model_root)
-    model_dir = model_root / f"random_stim_regressor_{run_stamp}"
+    model_dir = model_root / f"random_stim_{model_type}_{run_stamp}"
     model_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = model_dir / "model.pkl"
@@ -501,7 +475,7 @@ def train_forecaster_random_stim_eval(
 
     model_config_dump = {
         "created_at": run_stamp,
-        "model_type": "random_stim_regressor",
+        "model_type": f"random_stim_{model_type}",
         "model_file": str(model_path),
         "model_hyperparameters": _json_safe(hyperparams),
         "metrics": _json_safe(metrics),
@@ -564,23 +538,19 @@ def _resolve_model_config(model):
 
 def _train_and_save_model(model_config, cells, data_config, run_stamp):
     model_type = str(model_config["type"]).lower()
-    if model_type in {"regressor", "regression", "regression_forecaster"}:
+    if _is_supported_model_type(model_type):
         return _train_and_save_regressor(model_config, cells, data_config, run_stamp)
-    if model_type in {"transformer", "transformer_forecaster"}:
-        raise NotImplementedError("Transformer forecaster training is not implemented yet.")
     raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
 
 
 def _train_and_save_regressor(model_config, cells, data_config, run_stamp):
-    from aisam.comptools.regression_forecaster import train_regression_forecaster
-
     hyperparams = _forecaster_hyperparams_from_model_config(model_config)
 
     hyperparams.setdefault("past_feature_window", 20)
     hyperparams.setdefault("future_window", 1)
     hyperparams.setdefault("output_species", "F")
 
-    forecaster, metrics, dataset = train_regression_forecaster(cells, **hyperparams)
+    forecaster, metrics, dataset = _train_model_from_cells(cells, model_config, hyperparams)
     _assign_saved_sampling_metadata(forecaster, data_config)
 
     model_root = Path(
@@ -589,7 +559,8 @@ def _train_and_save_regressor(model_config, cells, data_config, run_stamp):
             Path(data_config["simulation_file"]).parent / "models",
         )
     )
-    model_dir = model_root / f"regressor_{run_stamp}"
+    model_type = str(model_config["type"]).lower()
+    model_dir = model_root / f"{model_type}_{run_stamp}"
     model_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = model_dir / "model.pkl"
@@ -615,7 +586,7 @@ def _train_and_save_regressor(model_config, cells, data_config, run_stamp):
 
     model_config_dump = {
         "created_at": run_stamp,
-        "model_type": "regressor",
+        "model_type": str(model_config["type"]).lower(),
         "model_file": str(model_path),
         "model_hyperparameters": _json_safe(hyperparams),
         "metrics": _json_safe(metrics),
@@ -676,6 +647,133 @@ def _forecaster_hyperparams_from_model_config(model_config):
         if key not in excluded:
             hyperparams.setdefault(key, value)
     return hyperparams
+
+
+def _is_supported_model_type(model_type):
+    return str(model_type).lower() in {
+        "regressor",
+        "regression",
+        "regression_forecaster",
+        "lstm",
+        "lstm_encoder_decoder",
+        "lstm_encoder_decoder_forecaster",
+    }
+
+
+def _is_lstm_model_type(model_type):
+    return str(model_type).lower() in {
+        "lstm",
+        "lstm_encoder_decoder",
+        "lstm_encoder_decoder_forecaster",
+    }
+
+
+def _train_model_from_cells(cells, model_config, hyperparams):
+    from aisam.comptools.regression_forecaster import (
+        cells_to_sequences,
+        make_window_dataset,
+        split_sequences_by_cell,
+    )
+
+    feature_species = hyperparams.get("feature_species")
+    output_species = hyperparams.get("output_species", "F")
+    sequences = cells_to_sequences(
+        cells,
+        feature_species=feature_species,
+        output_species=output_species,
+    )
+    train_sequences, validation_sequences = split_sequences_by_cell(
+        sequences,
+        validation_fraction=hyperparams.get("validation_fraction", 0.2),
+        random_state=hyperparams.get("random_state"),
+    )
+    window_args = _window_args_from_hyperparams(hyperparams)
+    X_train, y_train, train_meta = make_window_dataset(train_sequences, **window_args)
+    forecaster = _build_forecaster(
+        str(model_config["type"]).lower(),
+        model_config,
+        hyperparams,
+        window_args,
+        train_sequences,
+    )
+    forecaster.fit(X_train, y_train)
+    metrics = {"train": forecaster.evaluate(X_train, y_train)}
+    dataset = {
+        "X_train": X_train,
+        "y_train": y_train,
+        "train_meta": train_meta,
+        "train_sequences": train_sequences,
+        "validation_sequences": validation_sequences,
+    }
+    if validation_sequences:
+        X_val, y_val, val_meta = make_window_dataset(validation_sequences, **window_args)
+        val_predictions = forecaster.predict(X_val)
+        metrics["validation"] = _regression_metrics(y_val, val_predictions)
+        dataset.update(
+            {
+                "X_validation": X_val,
+                "y_validation": y_val,
+                "validation_meta": val_meta,
+                "validation_predictions": val_predictions,
+            }
+        )
+    return forecaster, metrics, dataset
+
+
+def _build_forecaster(model_type, model_config, hyperparams, window_args, train_sequences):
+    feature_dim, input_dim = _sequence_dimensions(train_sequences)
+    if _is_lstm_model_type(model_type):
+        try:
+            from aisam.comptools.LSTM_encoder_decoder_forecaster import LSTMEncoderDecoderForecaster
+        except ModuleNotFoundError as exc:
+            if exc.name == "torch":
+                raise ImportError("LSTM forecaster training requires PyTorch to be installed.") from exc
+            raise
+
+        return LSTMEncoderDecoderForecaster(
+            past_feature_window=window_args["past_feature_window"],
+            future_window=window_args["future_window"],
+            past_input_window=window_args["past_input_window"],
+            future_input_window=window_args["future_input_window"],
+            feature_dim=feature_dim,
+            input_dim=input_dim,
+            hidden_size=hyperparams.get("hidden_size", hyperparams.get("hidden_dim", 64)),
+            num_layers=hyperparams.get("num_layers", hyperparams.get("layers", 2)),
+            dropout=hyperparams.get("dropout", 0.0),
+            batch_size=hyperparams.get("batch_size", 32),
+            epochs=hyperparams.get("epochs", 10),
+            learning_rate=hyperparams.get("learning_rate", hyperparams.get("lr", 0.001)),
+            normalize=hyperparams.get("normalize", True),
+            device=hyperparams.get("device"),
+            random_state=hyperparams.get("random_state"),
+            verbose=hyperparams.get("verbose", True),
+        )
+
+    from aisam.comptools.regression_forecaster import RegressionForecaster
+
+    return RegressionForecaster(
+        past_feature_window=window_args["past_feature_window"],
+        future_window=window_args["future_window"],
+        past_input_window=window_args["past_input_window"],
+        future_input_window=window_args["future_input_window"],
+        regressor=hyperparams.get("regressor"),
+        normalize=hyperparams.get("normalize", True),
+    )
+
+
+def _sequence_dimensions(sequences):
+    if not sequences:
+        return 1, 1
+    first = sequences[0]
+    feature_dim = int(np.asarray(first["features"]).shape[1])
+    input_dim = int(np.asarray(first["inputs"]).shape[1])
+    return feature_dim, input_dim
+
+
+def _regression_metrics(y_true, y_pred):
+    from aisam.comptools.regression_forecaster import regression_metrics
+
+    return regression_metrics(y_true, y_pred)
 
 
 def _coerce_simulation_paths(simulation_paths):
@@ -809,18 +907,27 @@ def _stim_ranges_from_run_config(run_config, cells):
     total_cells = simulated_cells.get("total_cells")
     if total_cells is None:
         total_cells = len(cells)
-    fallback = stimulation_cell_ranges(total_cells)
-    return (
-        simulated_cells.get("random_stimulation_cells", fallback["random_stimulation_cells"]),
-        simulated_cells.get(
+    if all(
+        key in simulated_cells
+        for key in (
+            "random_stimulation_cells",
             "repetitive_stimulation_cells_red_first",
-            fallback["repetitive_stimulation_cells_red_first"],
-        ),
-        simulated_cells.get(
             "repetitive_stimulation_cells_green_first",
-            fallback["repetitive_stimulation_cells_green_first"],
-        ),
-    )
+        )
+    ):
+        fallback = {}
+    else:
+        fallback = stimulation_cell_ranges(total_cells)
+    random_range = simulated_cells.get("random_stimulation_cells")
+    red_range = simulated_cells.get("repetitive_stimulation_cells_red_first")
+    green_range = simulated_cells.get("repetitive_stimulation_cells_green_first")
+    if random_range is None:
+        random_range = fallback["random_stimulation_cells"]
+    if red_range is None:
+        red_range = fallback["repetitive_stimulation_cells_red_first"]
+    if green_range is None:
+        green_range = fallback["repetitive_stimulation_cells_green_first"]
+    return random_range, red_range, green_range
 
 
 def _numeric_cell_id(cell_id):
@@ -935,16 +1042,21 @@ def _window_error_info(y_true, y_pred):
     per_window_mse = np.mean(residual ** 2, axis=1)
     per_window_rmse = np.sqrt(per_window_mse)
     per_window_mae = np.mean(np.abs(residual), axis=1)
+    log10_rmse = np.log10(np.clip(per_window_rmse, np.finfo(float).tiny, None))
     return {
         "mean_rmse": float(np.mean(per_window_rmse)),
         "median_rmse": float(np.median(per_window_rmse)),
         "std_rmse": float(np.std(per_window_rmse)),
         "min_rmse": float(np.min(per_window_rmse)),
         "max_rmse": float(np.max(per_window_rmse)),
+        "mean_log10_rmse": float(np.mean(log10_rmse)),
+        "median_log10_rmse": float(np.median(log10_rmse)),
+        "std_log10_rmse": float(np.std(log10_rmse)),
         "mean_mae": float(np.mean(per_window_mae)),
         "median_mae": float(np.median(per_window_mae)),
         "std_mae": float(np.std(per_window_mae)),
         "per_window_rmse": per_window_rmse.tolist(),
+        "per_window_log10_rmse": log10_rmse.tolist(),
     }
 
 

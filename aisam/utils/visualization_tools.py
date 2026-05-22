@@ -184,19 +184,20 @@ def plot_forecaster_evaluation_examples(
 
 def plot_error_distribution(errors, save_path, title="Error distribution"):
     """
-    Save a histogram of per-window RMSE values.
+    Save a histogram of log10 per-window RMSE values.
     """
     from pathlib import Path
 
     errors = np.asarray(errors, dtype=float).reshape(-1)
+    log_errors = np.log10(np.clip(errors, np.finfo(float).tiny, None))
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(6, 4))
-    bins = min(40, max(10, int(np.sqrt(len(errors)))))
-    ax.hist(errors, bins=bins, color="0.25", edgecolor="0.25", alpha=0.82)
-    ax.axvline(float(np.mean(errors)), color="tab:blue", linewidth=1.5, linestyle="--", label="mean")
-    ax.set_xlabel("RMSE")
+    bins = min(40, max(10, int(np.sqrt(len(log_errors)))))
+    ax.hist(log_errors, bins=bins, color="0.25", edgecolor="0.25", alpha=0.82)
+    ax.axvline(float(np.mean(log_errors)), color="tab:blue", linewidth=1.5, linestyle="--", label="mean")
+    ax.set_xlabel("log10(RMSE)")
     ax.set_ylabel("count")
     ax.set_title(title)
     ax.legend(frameon=False)
