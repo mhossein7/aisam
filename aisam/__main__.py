@@ -4,7 +4,7 @@ from os import PathLike
 
 import numpy as np
 
-from aisam.utils.forecaster_training import train_forecaster_from_simulation_config
+from aisam.utils.forecaster_training import train_forecaster
 from aisam.utils.pipeline import run_recipe
 
 
@@ -12,27 +12,23 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="aisam")
     subparsers = parser.add_subparsers(dest="command")
 
-    simulate = subparsers.add_parser("simulate", help="Run an experiment from recipe.json.")
-    simulate.add_argument(
-        "--path",
-        default=None,
-        help="Folder containing recipe.json. Defaults to the current working directory.",
+    run = subparsers.add_parser("run", help="Run a recipe-driven AISAM experiment.")
+    _add_run_args(run)
+    simulate = subparsers.add_parser("simulate", help="Compatibility alias for `aisam run`.")
+    _add_run_args(simulate)
+    train = subparsers.add_parser(
+        "train",
+        help="Compatibility command for policy-driven training from existing simulation data.",
     )
-    simulate.add_argument(
-        "--no-progress",
-        action="store_true",
-        help="Disable per-cell progress bars.",
-    )
-    train = subparsers.add_parser("train", help="Train a forecaster from existing simulation data.")
     _add_train_args(train)
 
     args = parser.parse_args(argv)
-    if args.command == "simulate":
+    if args.command in {"run", "simulate"}:
         result = run_recipe(root_folder=args.path, progress=not args.no_progress)
         print(json.dumps(_json_safe(result), indent=2))
         return 0
     if args.command == "train":
-        result = train_forecaster_from_simulation_config(
+        result = train_forecaster(
             path=args.path,
             config=args.config,
             output_root=args.output_root,
@@ -50,11 +46,24 @@ def main(argv=None):
     return 0
 
 
+def _add_run_args(parser):
+    parser.add_argument(
+        "--path",
+        default=None,
+        help="Folder containing recipe.json. Defaults to the current working directory.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable per-cell progress bars.",
+    )
+
+
 def _add_train_args(parser):
     parser.add_argument(
         "--path",
         default=None,
-        help="Main simulation.pkl path or a folder containing simulation.pkl. Defaults to cwd.",
+        help="Simulation parquet/pickle path or a run folder. Defaults to cwd.",
     )
     parser.add_argument(
         "--config",

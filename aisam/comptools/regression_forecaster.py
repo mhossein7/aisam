@@ -1,6 +1,7 @@
 import dill
 import numpy as np
 from os import PathLike
+from pathlib import Path
 
 from aisam.utils import aux
 
@@ -121,6 +122,16 @@ def load_cells(path):
         return dill.load(f)
 
 
+def load_simulation_dataframe(path):
+    """Load a long-form simulation parquet file."""
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError("Reading simulation parquet files requires pandas and pyarrow.") from exc
+
+    return pd.read_parquet(path)
+
+
 def cells_to_sequences(
     cells,
     feature_species=None,
@@ -141,7 +152,7 @@ def cells_to_sequences(
     for cell_id in _sorted_cell_ids(cells):
         cell = cells[cell_id]
         species_names = list(cell.expressions.keys())
-        selected_species = feature_species or species_names
+        selected_species = _normalize_species_list(feature_species, species_names)
 
         if output_species not in cell.expressions:
             raise ValueError(f"Output species {output_species!r} not found in cell {cell_id}.")
@@ -178,6 +189,65 @@ def cells_to_sequences(
                         "realization_index": realization_index,
                     }
                 )
+
+    return sequences
+
+
+def dataframe_to_sequences(
+    dataframe,
+    feature_species=None,
+    output_species="F",
+    input_dim=1,
+    value_column="value",
+):
+    """
+    Convert a long-form simulation dataframe into per-realization sequences.
+
+    Expected columns are:
+    cell_id, realization, species, stim, time, value
+    """
+    required = {"cell_id", "realization", "species", "stim", "time", value_column}
+    missing = required.difference(dataframe.columns)
+    if missing:
+        raise ValueError(f"Simulation dataframe is missing required columns: {sorted(missing)}")
+
+    sequences = []
+    species_names = list(dataframe["species"].drop_duplicates())
+    selected_species = _normalize_species_list(feature_species, species_names)
+    missing_species = [name for name in selected_species if name not in species_names]
+    if output_species not in species_names:
+        missing_species.append(output_species)
+    if missing_species:
+        raise ValueError(f"Species missing from simulation dataframe: {sorted(set(missing_species))}")
+
+    grouped = dataframe.groupby(["cell_id", "realization"], sort=False)
+    for (cell_id, realization), group in grouped:
+        output_group = _species_frame(group, output_species, value_column)
+        reference_times = output_group["time"].to_numpy()
+        output = output_group[value_column].to_numpy(dtype=float)
+        stim = output_group["stim"].to_numpy(dtype=float).reshape(-1, input_dim)
+
+        feature_cols = []
+        for species in selected_species:
+            species_group = _species_frame(group, species, value_column)
+            species_times = species_group["time"].to_numpy()
+            if not np.array_equal(reference_times, species_times):
+                raise ValueError(
+                    f"Species {species!r} in cell {cell_id!r}, realization {realization!r} "
+                    "does not share the same time grid as the output species."
+                )
+            feature_cols.append(species_group[value_column].to_numpy(dtype=float))
+
+        sequences.append(
+            {
+                "features": np.column_stack(feature_cols).astype(float),
+                "inputs": stim,
+                "output": output,
+                "cell_id": cell_id,
+                "run_index": 0,
+                "realization_index": _realization_index(realization),
+            }
+        )
 
     return sequences
 
@@ -478,10 +548,43 @@ def stim_to_input_trace(stim_vec, trace_length, input_dim=1):
 
 def _coerce_sequences(data, feature_species, output_species):
     if isinstance(data, (str, PathLike)):
-        return cells_to_sequences(load_cells(data), feature_species, output_species)
+        path = Path(data)
+        if path.suffix == ".parquet":
+            return dataframe_to_sequences(
+                load_simulation_dataframe(path),
+                feature_species=feature_species,
+                output_species=output_species,
+            )
+        return cells_to_sequences(load_cells(path), feature_species, output_species)
     if isinstance(data, dict) and data and hasattr(next(iter(data.values())), "expressions"):
         return cells_to_sequences(data, feature_species, output_species)
+    if hasattr(data, "columns") and {"cell_id", "realization", "species", "stim", "time"}.issubset(data.columns):
+        return dataframe_to_sequences(data, feature_species, output_species)
     return data
+
+
+def _species_frame(group, species, value_column):
+    frame = group[group["species"] == species].sort_values("time")
+    if frame.empty:
+        raise ValueError(f"Species {species!r} is missing from a cell/realization group.")
+    if frame["time"].duplicated().any():
+        raise ValueError(f"Species {species!r} has duplicate time points in a cell/realization group.")
+    return frame
+
+
+def _normalize_species_list(feature_species, species_names):
+    if feature_species is None:
+        return list(species_names)
+    if isinstance(feature_species, str):
+        return [feature_species]
+    return list(feature_species)
+
+
+def _realization_index(realization):
+    try:
+        return int(realization) - 1
+    except (TypeError, ValueError):
+        return realization
 
 
 def _as_realization_matrix(values):

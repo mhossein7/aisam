@@ -14,125 +14,11 @@ from aisam.utils.simulation import (
 )
 
 
-def train_forecaster_from_simulation(
-    simulation_paths,
-    model=None,
-    output_root=None,
-    visualization=False,
-    random_state=None,
-    include_noisy="none",
-    include_noisy_periodic="none",
-    include_main_periodic="none",
-):
-    """
-    Train a forecaster model from one or more saved `simulation.pkl` files.
-
-    When multiple simulation files are supplied, cells are merged with
-    file-specific cell ids so windows from same-numbered cells in different runs
-    are not grouped together.
-    """
-    if (
-        _policy_enabled(include_noisy)
-        or _policy_enabled(include_noisy_periodic)
-        or _policy_enabled(include_main_periodic)
-    ):
-        return train_forecaster_from_simulation_config(
-            path=simulation_paths,
-            config=model,
-            output_root=output_root,
-            visualization=visualization,
-            random_state=random_state,
-            include_noisy=include_noisy,
-            include_noisy_periodic=include_noisy_periodic,
-            include_main_periodic=include_main_periodic,
-        )
-
-    paths = _coerce_simulation_paths(simulation_paths)
-    cells = _load_and_merge_cells(paths)
-    run_configs = [_load_run_config_from_simulation_path(path) for path in paths]
-    run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-    model_config = _resolve_model_config(model or {"type": "regressor"})
-    model_type = str(model_config["type"]).lower()
-    if not _is_supported_model_type(model_type):
-        raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
-
-    hyperparams = _forecaster_hyperparams_from_model_config(model_config)
-    first_config = next((cfg for cfg in run_configs if cfg), {})
-    hyperparams.setdefault("past_feature_window", 20)
-    hyperparams.setdefault("future_window", 1)
-    hyperparams.setdefault("output_species", "F")
-    if random_state is not None:
-        hyperparams.setdefault("random_state", random_state)
-
-    forecaster, metrics, dataset = _train_model_from_cells(cells, model_config, hyperparams)
-    _assign_saved_sampling_metadata(forecaster, first_config)
-
-    model_root = Path(output_root or model_config.get("output_root") or (paths[0].parent / "models"))
-    model_dir = model_root / f"{model_type}_{run_stamp}"
-    model_dir.mkdir(parents=True, exist_ok=True)
-
-    model_path = model_dir / "model.pkl"
-    with open(model_path, "wb") as f:
-        dill.dump(forecaster, f)
-
-    artifacts = {}
-    if "X_validation" in dataset:
-        artifacts = _save_evaluation_artifacts(
-            forecaster=forecaster,
-            dataset=dataset,
-            output_dir=model_dir / "figures",
-            output_species=hyperparams.get("output_species", "F"),
-            random_state=random_state,
-            title="validation",
-        )
-    performance_path = _save_performance_info(
-        model_dir / "performance.json",
-        metrics=metrics,
-        dataset=dataset if "X_validation" in dataset else None,
-        label="validation",
-    )
-
-    model_config_dump = {
-        "created_at": run_stamp,
-        "model_type": model_type,
-        "model_file": str(model_path),
-        "model_hyperparameters": _json_safe(hyperparams),
-        "metrics": _json_safe(metrics),
-        "data": {
-            "simulation_files": [str(path) for path in paths],
-            "simulation_configs": _json_safe(run_configs),
-            "train_sequences": len(dataset["train_sequences"]),
-            "validation_sequences": len(dataset["validation_sequences"]),
-            "train_windows": int(dataset["X_train"].shape[0]),
-            "validation_windows": int(dataset["X_validation"].shape[0])
-            if "X_validation" in dataset
-            else 0,
-        },
-        "performance_file": str(performance_path),
-        "visualization_files": {key: str(value) for key, value in artifacts.get("figures", {}).items()},
-    }
-
-    model_config_path = model_dir / "config.json"
-    with open(model_config_path, "w") as f:
-        json.dump(model_config_dump, f, indent=2)
-
-    return {
-        "model_dir": model_dir,
-        "model_path": model_path,
-        "config_path": model_config_path,
-        "metrics": metrics,
-        "figures": artifacts.get("figures", {}),
-        "performance_path": performance_path,
-        "config": model_config_dump,
-    }
-
-
-def train_forecaster_from_simulation_config(
+def train_forecaster(
     path=None,
     config=None,
     output_root=None,
-    visualization=False,
+    visualization=None,
     random_state=None,
     include_noisy="none",
     include_noisy_periodic="eval",
@@ -140,12 +26,15 @@ def train_forecaster_from_simulation_config(
     label=None,
 ):
     """
-    Train a forecaster from existing simulation data with explicit policies.
+    Train a forecaster from saved simulation data with explicit policies.
 
     Policies are "train", "eval", or "none":
     - include_main_periodic controls main-run repetitive stim cells.
     - include_noisy controls noisy-run random stim cells.
     - include_noisy_periodic controls noisy-run repetitive stim cells.
+
+    `path` may be a run folder, a simulation parquet file, a legacy
+    simulation.pkl file, or a list of those files.
     """
     from aisam.comptools.regression_forecaster import make_window_dataset, split_sequences_by_cell
 
@@ -262,14 +151,16 @@ def train_forecaster_from_simulation_config(
     with open(model_path, "wb") as f:
         dill.dump(forecaster, f)
 
-    artifacts = _save_evaluation_artifacts(
-        forecaster=forecaster,
-        dataset=dataset,
-        output_dir=model_dir / "figures",
-        output_species=hyperparams.get("output_species", "F"),
-        random_state=hyperparams.get("random_state"),
-        title="evaluation",
-    )
+    artifacts = {}
+    if visualization:
+        artifacts = _save_evaluation_artifacts(
+            forecaster=forecaster,
+            dataset=dataset,
+            output_dir=model_dir / "figures",
+            output_species=hyperparams.get("output_species", "F"),
+            random_state=hyperparams.get("random_state"),
+            title="evaluation",
+        )
     performance_path = _save_performance_info(
         model_dir / "performance.json",
         metrics=metrics,
@@ -285,14 +176,16 @@ def train_forecaster_from_simulation_config(
             hyperparams=hyperparams,
         )
         noisy_dir = model_dir / "noisy_evaluation" / noisy_group["path"].parent.name
-        noisy_artifacts = _save_evaluation_artifacts(
-            forecaster=forecaster,
-            dataset=noisy_dataset,
-            output_dir=noisy_dir / "figures",
-            output_species=hyperparams.get("output_species", "F"),
-            random_state=hyperparams.get("random_state"),
-            title=noisy_group["path"].parent.name,
-        )
+        noisy_artifacts = {}
+        if visualization:
+            noisy_artifacts = _save_evaluation_artifacts(
+                forecaster=forecaster,
+                dataset=noisy_dataset,
+                output_dir=noisy_dir / "figures",
+                output_species=hyperparams.get("output_species", "F"),
+                random_state=hyperparams.get("random_state"),
+                title=noisy_group["path"].parent.name,
+            )
         noisy_performance_path = _save_performance_info(
             noisy_dir / "performance.json",
             metrics={"evaluation": noisy_metrics},
@@ -352,11 +245,67 @@ def train_forecaster_from_simulation_config(
     }
 
 
+def train_forecaster_from_simulation(
+    simulation_paths,
+    model=None,
+    output_root=None,
+    visualization=None,
+    random_state=None,
+    include_noisy="none",
+    include_noisy_periodic="none",
+    include_main_periodic="train",
+):
+    """
+    Compatibility wrapper around `train_forecaster`.
+
+    Prefer `train_forecaster` for new code.
+    """
+    return train_forecaster(
+        path=simulation_paths,
+        config=model,
+        output_root=output_root,
+        visualization=visualization,
+        random_state=random_state,
+        include_noisy=include_noisy,
+        include_noisy_periodic=include_noisy_periodic,
+        include_main_periodic=include_main_periodic,
+    )
+
+
+def train_forecaster_from_simulation_config(
+    path=None,
+    config=None,
+    output_root=None,
+    visualization=None,
+    random_state=None,
+    include_noisy="none",
+    include_noisy_periodic="eval",
+    include_main_periodic="eval",
+    label=None,
+):
+    """
+    Compatibility wrapper around `train_forecaster`.
+
+    Prefer `train_forecaster` for new code.
+    """
+    return train_forecaster(
+        path=path,
+        config=config,
+        output_root=output_root,
+        visualization=visualization,
+        random_state=random_state,
+        include_noisy=include_noisy,
+        include_noisy_periodic=include_noisy_periodic,
+        include_main_periodic=include_main_periodic,
+        label=label,
+    )
+
+
 def train_forecaster_random_stim_eval(
     source,
     model=None,
     output_root=None,
-    visualization=False,
+    visualization=None,
     include_repetitive_eval=True,
     random_state=None,
     **simulation_kwargs,
@@ -369,149 +318,34 @@ def train_forecaster_random_stim_eval(
     normal simulation config/root-folder input. Non-pkl sources trigger a fresh
     standard simulation before forecaster training.
     """
-    from aisam.comptools.regression_forecaster import make_window_dataset, split_sequences_by_cell
-
-    run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     model_config = _resolve_model_config(model or {"type": "regressor"})
     model_type = str(model_config["type"]).lower()
     if not _is_supported_model_type(model_type):
         raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
 
     if _is_simulation_path_source(source):
-        paths = _coerce_simulation_paths(source)
-        random_sequences, repetitive_sequences, run_configs = _sequences_by_stim_group_from_paths(
-            paths,
-            model_config=model_config,
-        )
-        default_model_root = paths[0].parent / "models"
+        training_path = source
         simulation_result = None
     else:
         if not include_repetitive_eval:
             simulation_kwargs.setdefault("include_repetitive_stims", False)
-        simulation_result = run_training_simulation(source, include_cells=True, **simulation_kwargs)
-        random_sequences, repetitive_sequences = _sequences_by_stim_group_from_cells(
-            simulation_result["cells"],
-            run_config=simulation_result["config"],
-            run_prefix="standard",
-            model_config=model_config,
-        )
-        run_configs = [simulation_result["config"]]
-        default_model_root = Path(simulation_result["simulation_path"]).parent / "models"
-        simulation_result.pop("cells", None)
+        simulation_result = run_training_simulation(source, include_cells=False, **simulation_kwargs)
+        training_path = simulation_result["simulation_path"]
 
-    if not random_sequences:
-        raise ValueError("No random-stim sequences were found for forecaster training.")
-    if include_repetitive_eval and not repetitive_sequences:
-        raise ValueError("No repetitive-stim sequences were found for forecaster evaluation.")
-
-    hyperparams = _forecaster_hyperparams_from_model_config(model_config)
-    hyperparams.setdefault("past_feature_window", 20)
-    hyperparams.setdefault("future_window", 1)
-    hyperparams.setdefault("output_species", "F")
-    if random_state is not None:
-        hyperparams.setdefault("random_state", random_state)
-    validation_fraction = float(hyperparams.get("validation_fraction", 0.2))
-    if validation_fraction <= 0 or validation_fraction >= 1:
-        raise ValueError("validation_fraction must be in the range (0, 1) for random-stim holdout evaluation.")
-
-    train_random_sequences, holdout_random_sequences = split_sequences_by_cell(
-        random_sequences,
-        validation_fraction=validation_fraction,
-        random_state=hyperparams.get("random_state"),
-    )
-    evaluation_sequences = list(holdout_random_sequences)
-    if include_repetitive_eval:
-        evaluation_sequences.extend(repetitive_sequences)
-    window_args = _window_args_from_hyperparams(hyperparams)
-    X_train, y_train, train_meta = make_window_dataset(train_random_sequences, **window_args)
-    X_eval, y_eval, eval_meta = make_window_dataset(evaluation_sequences, **window_args)
-
-    forecaster = _build_forecaster(model_type, model_config, hyperparams, window_args, train_random_sequences)
-    forecaster.fit(X_train, y_train)
-    eval_predictions = forecaster.predict(X_eval)
-    metrics = {
-        "train_random_stims": forecaster.evaluate(X_train, y_train),
-        "random_holdout_plus_repetitive_evaluation"
-        if include_repetitive_eval
-        else "random_holdout_evaluation": _regression_metrics(y_eval, eval_predictions),
-    }
-    first_config = next((cfg for cfg in run_configs if cfg), {})
-    _assign_saved_sampling_metadata(forecaster, first_config)
-
-    dataset = {
-        "X_train": X_train,
-        "y_train": y_train,
-        "train_meta": train_meta,
-        "train_sequences": train_random_sequences,
-        "validation_sequences": evaluation_sequences,
-        "X_validation": X_eval,
-        "y_validation": y_eval,
-        "validation_meta": eval_meta,
-        "validation_predictions": eval_predictions,
-    }
-
-    model_root = Path(output_root or model_config.get("output_root") or default_model_root)
-    model_dir = model_root / f"random_stim_{model_type}_{run_stamp}"
-    model_dir.mkdir(parents=True, exist_ok=True)
-
-    model_path = model_dir / "model.pkl"
-    with open(model_path, "wb") as f:
-        dill.dump(forecaster, f)
-
-    artifacts = _save_evaluation_artifacts(
-        forecaster=forecaster,
-        dataset=dataset,
-        output_dir=model_dir / "figures",
-        output_species=hyperparams.get("output_species", "F"),
+    result = train_forecaster(
+        path=training_path,
+        config=model_config,
+        output_root=output_root,
+        visualization=visualization,
         random_state=random_state,
-        title="evaluation",
+        include_noisy="none",
+        include_noisy_periodic="none",
+        include_main_periodic="eval" if include_repetitive_eval else "none",
+        label=f"random_stim_{model_type}",
     )
-    performance_path = _save_performance_info(
-        model_dir / "performance.json",
-        metrics=metrics,
-        dataset=dataset,
-        label="evaluation",
-    )
-
-    model_config_dump = {
-        "created_at": run_stamp,
-        "model_type": f"random_stim_{model_type}",
-        "model_file": str(model_path),
-        "model_hyperparameters": _json_safe(hyperparams),
-        "metrics": _json_safe(metrics),
-        "performance_file": str(performance_path),
-        "data": {
-            "training_policy": "random_stim_cells_train_split_only",
-            "evaluation_policy": "random_stim_holdout_plus_all_repetitive_stim_cells"
-            if include_repetitive_eval
-            else "random_stim_holdout_only",
-            "include_repetitive_eval": include_repetitive_eval,
-            "simulation_configs": _json_safe(run_configs),
-            "random_train_sequences": len(train_random_sequences),
-            "random_holdout_sequences": len(holdout_random_sequences),
-            "available_repetitive_sequences": len(repetitive_sequences),
-            "repetitive_eval_sequences": len(repetitive_sequences) if include_repetitive_eval else 0,
-            "total_evaluation_sequences": len(evaluation_sequences),
-            "train_windows": int(X_train.shape[0]),
-            "evaluation_windows": int(X_eval.shape[0]),
-        },
-        "simulation_result": _json_safe(simulation_result) if simulation_result else None,
-        "visualization_files": {key: str(value) for key, value in artifacts.get("figures", {}).items()},
-    }
-
-    model_config_path = model_dir / "config.json"
-    with open(model_config_path, "w") as f:
-        json.dump(model_config_dump, f, indent=2)
-
-    return {
-        "model_dir": model_dir,
-        "model_path": model_path,
-        "config_path": model_config_path,
-        "performance_path": performance_path,
-        "metrics": metrics,
-        "figures": artifacts.get("figures", {}),
-        "config": model_config_dump,
-    }
+    if simulation_result is not None:
+        result["simulation_result"] = simulation_result
+    return result
 
 
 def _resolve_model_config(model):
@@ -539,6 +373,18 @@ def _resolve_model_config(model):
 def _train_and_save_model(model_config, cells, data_config, run_stamp):
     model_type = str(model_config["type"]).lower()
     if _is_supported_model_type(model_type):
+        data_path = _simulation_data_path_from_config(data_config)
+        if data_path is not None:
+            return train_forecaster(
+                path=data_path,
+                config=model_config,
+                visualization=bool(model_config.get("visualization", False)),
+                random_state=model_config.get("random_state"),
+                include_noisy="none",
+                include_noisy_periodic="none",
+                include_main_periodic="train",
+                label=model_type,
+            )
         return _train_and_save_regressor(model_config, cells, data_config, run_stamp)
     raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
 
@@ -782,10 +628,10 @@ def _coerce_simulation_paths(simulation_paths):
     else:
         paths = [Path(path) for path in simulation_paths]
     if not paths:
-        raise ValueError("Provide at least one simulation.pkl path.")
+        raise ValueError("Provide at least one simulation data path.")
     missing = [str(path) for path in paths if not path.exists()]
     if missing:
-        raise FileNotFoundError(f"Simulation files not found: {missing}")
+        raise FileNotFoundError(f"Simulation data files not found: {missing}")
     return paths
 
 
@@ -795,12 +641,12 @@ def _resolve_main_simulation_paths(path):
     if isinstance(path, (str, PathLike)):
         path = Path(path)
         if path.is_dir():
-            path = path / "simulation.pkl"
+            path = _preferred_simulation_file(path)
         return _coerce_simulation_paths(path)
     resolved = []
     for item in path:
         item_path = Path(item)
-        resolved.append(item_path / "simulation.pkl" if item_path.is_dir() else item_path)
+        resolved.append(_preferred_simulation_file(item_path) if item_path.is_dir() else item_path)
     return _coerce_simulation_paths(resolved)
 
 
@@ -809,8 +655,55 @@ def _discover_noisy_simulation_paths(main_simulation_path):
     noisy_root = root / "noisy"
     if not noisy_root.exists():
         return []
-    paths = sorted(noisy_root.glob("sim_*/simulation.pkl"))
-    return [path for path in paths if path.exists()]
+    paths = []
+    for sim_dir in sorted(noisy_root.glob("sim_*")):
+        if sim_dir.is_dir():
+            paths.append(_preferred_simulation_file(sim_dir, required=False))
+    return [path for path in paths if path is not None and path.exists()]
+
+
+def _preferred_simulation_file(run_dir, required=True):
+    run_dir = Path(run_dir)
+    config_path = run_dir / "config.json"
+    if config_path.exists():
+        with open(config_path, "r") as f:
+            run_config = json.load(f)
+        for key in ("simulation_data_file", "simulation_parquet_file"):
+            configured = Path(run_config[key]) if run_config.get(key) else None
+            if configured is None:
+                continue
+            configured = configured if configured.is_absolute() else run_dir / configured
+            if configured.exists():
+                return configured
+
+    for filename in ("simulation.parquet", "simulation.pkl"):
+        candidate = run_dir / filename
+        if candidate.exists():
+            return candidate
+    if config_path.exists():
+        for key in ("simulation_file", "simulation_pickle_file"):
+            configured = Path(run_config[key]) if run_config.get(key) else None
+            if configured is None:
+                continue
+            configured = configured if configured.is_absolute() else run_dir / configured
+            if configured.exists():
+                return configured
+    if required:
+        raise FileNotFoundError(f"No simulation.parquet or simulation.pkl found in {run_dir}.")
+    return None
+
+
+def _simulation_data_path_from_config(config):
+    for key in (
+        "simulation_data_file",
+        "simulation_parquet_file",
+        "simulation_file",
+        "simulation_pickle_file",
+    ):
+        value = config.get(key)
+        if value:
+            return Path(value)
+    return None
 
 
 def _load_and_merge_cells(paths):
@@ -843,9 +736,12 @@ def _sampling_from_run_config(config):
 
 def _is_simulation_path_source(source):
     if isinstance(source, (str, PathLike)):
-        return Path(source).suffix == ".pkl"
+        path = Path(source)
+        return path.suffix in {".parquet", ".pkl"} or (
+            path.is_dir() and _preferred_simulation_file(path, required=False) is not None
+        )
     if isinstance(source, (list, tuple)):
-        return all(Path(path).suffix == ".pkl" for path in source)
+        return all(_is_simulation_path_source(path) for path in source)
     return False
 
 
@@ -855,20 +751,70 @@ def _sequences_by_stim_group_from_paths(paths, model_config, run_label="run"):
     run_configs = []
 
     for run_index, path in enumerate(paths):
-        with open(path, "rb") as f:
-            cells = dill.load(f)
         run_config = _load_run_config_from_simulation_path(path)
         run_configs.append(run_config)
-        run_random, run_repetitive = _sequences_by_stim_group_from_cells(
-            cells,
-            run_config=run_config,
-            run_prefix=f"{run_label}{run_index + 1}",
-            model_config=model_config,
-        )
-        random_sequences.extend(run_random)
-        repetitive_sequences.extend(run_repetitive)
+        sequences = _sequences_from_simulation_path(path, model_config)
+        run_random, run_repetitive = _split_sequences_by_stim_group(sequences, run_config)
+        random_sequences.extend(_prefix_sequence_cell_ids(run_random, f"{run_label}{run_index + 1}"))
+        repetitive_sequences.extend(_prefix_sequence_cell_ids(run_repetitive, f"{run_label}{run_index + 1}"))
 
     return random_sequences, repetitive_sequences, run_configs
+
+
+def _sequences_from_simulation_path(path, model_config):
+    from aisam.comptools.regression_forecaster import (
+        cells_to_sequences,
+        dataframe_to_sequences,
+        load_simulation_dataframe,
+    )
+
+    hyperparams = _forecaster_hyperparams_from_model_config(model_config)
+    feature_species = hyperparams.get("feature_species")
+    output_species = hyperparams.get("output_species", "F")
+    input_dim = int(hyperparams.get("input_dim", 1))
+
+    path = Path(path)
+    if path.suffix == ".parquet":
+        return dataframe_to_sequences(
+            load_simulation_dataframe(path),
+            feature_species=feature_species,
+            output_species=output_species,
+            input_dim=input_dim,
+        )
+    if path.suffix == ".pkl":
+        with open(path, "rb") as f:
+            cells = dill.load(f)
+        return cells_to_sequences(
+            cells,
+            feature_species=feature_species,
+            output_species=output_species,
+            input_dim=input_dim,
+        )
+    raise ValueError(f"Unsupported simulation data file type: {path}")
+
+
+def _split_sequences_by_stim_group(sequences, run_config):
+    random_range, red_range, green_range = _stim_ranges_from_run_config(run_config, sequences)
+    random_sequences = []
+    repetitive_sequences = []
+    for sequence in sequences:
+        numeric_id = _numeric_cell_id(sequence.get("cell_id"))
+        if _id_in_range(numeric_id, random_range):
+            random_sequences.append(sequence)
+        elif _id_in_range(numeric_id, red_range) or _id_in_range(numeric_id, green_range):
+            repetitive_sequences.append(sequence)
+    return random_sequences, repetitive_sequences
+
+
+def _prefix_sequence_cell_ids(sequences, run_prefix):
+    prefixed = []
+    for sequence in sequences:
+        copied = dict(sequence)
+        original_cell_id = copied.get("cell_id")
+        copied["source_cell_id"] = original_cell_id
+        copied["cell_id"] = f"{run_prefix}_cell{original_cell_id}"
+        prefixed.append(copied)
+    return prefixed
 
 
 def _sequences_by_stim_group_from_cells(cells, run_config, run_prefix, model_config):
@@ -877,36 +823,23 @@ def _sequences_by_stim_group_from_cells(cells, run_config, run_prefix, model_con
     hyperparams = _forecaster_hyperparams_from_model_config(model_config)
     feature_species = hyperparams.get("feature_species")
     output_species = hyperparams.get("output_species", "F")
-    random_range, red_range, green_range = _stim_ranges_from_run_config(run_config, cells)
-
-    random_cells = {}
-    repetitive_cells = {}
-    for cell_id, cell in cells.items():
-        numeric_id = _numeric_cell_id(cell_id)
-        prefixed_id = f"{run_prefix}_cell{cell_id}"
-        if _id_in_range(numeric_id, random_range):
-            random_cells[prefixed_id] = cell
-        elif _id_in_range(numeric_id, red_range) or _id_in_range(numeric_id, green_range):
-            repetitive_cells[prefixed_id] = cell
-
-    random_sequences = cells_to_sequences(
-        random_cells,
+    sequences = cells_to_sequences(
+        cells,
         feature_species=feature_species,
         output_species=output_species,
     )
-    repetitive_sequences = cells_to_sequences(
-        repetitive_cells,
-        feature_species=feature_species,
-        output_species=output_species,
+    random_sequences, repetitive_sequences = _split_sequences_by_stim_group(sequences, run_config)
+    return (
+        _prefix_sequence_cell_ids(random_sequences, run_prefix),
+        _prefix_sequence_cell_ids(repetitive_sequences, run_prefix),
     )
-    return random_sequences, repetitive_sequences
 
 
 def _stim_ranges_from_run_config(run_config, cells):
     simulated_cells = run_config.get("simulated_cells", {})
     total_cells = simulated_cells.get("total_cells")
     if total_cells is None:
-        total_cells = len(cells)
+        total_cells = _infer_total_cells(cells)
     if all(
         key in simulated_cells
         for key in (
@@ -934,10 +867,34 @@ def _numeric_cell_id(cell_id):
     try:
         return int(cell_id)
     except (TypeError, ValueError):
-        digits = "".join(ch for ch in str(cell_id) if ch.isdigit())
+        digits = ""
+        for ch in reversed(str(cell_id)):
+            if ch.isdigit():
+                digits = ch + digits
+            elif digits:
+                break
         if not digits:
             raise ValueError(f"Cannot infer numeric cell id from {cell_id!r}.")
         return int(digits)
+
+
+def _infer_total_cells(source):
+    if isinstance(source, dict):
+        return len(source)
+    cell_ids = {
+        sequence.get("source_cell_id", sequence.get("cell_id"))
+        for sequence in source
+        if sequence.get("source_cell_id", sequence.get("cell_id")) is not None
+    }
+    numeric_ids = []
+    for cell_id in cell_ids:
+        try:
+            numeric_ids.append(_numeric_cell_id(cell_id))
+        except ValueError:
+            pass
+    if numeric_ids:
+        return max(numeric_ids)
+    return len(cell_ids)
 
 
 def _id_in_range(cell_id, cell_range):

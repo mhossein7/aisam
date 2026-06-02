@@ -14,12 +14,12 @@ graph TD
     stims["standard stims<br/>first total_cell - 100 random<br/>next 50 repetitive red-first<br/>last 50 repetitive green-first"]
     sim["standard GillesPy simulation<br/>total_cell x num_realizations"]
     out["training_data directory<br/>root_folder/training_data<br/>or assets/yymmdd/training_data<br/>when called with only config path"]
-    saved["timestamped run folder<br/>simulation.pkl<br/>simulation_params.json<br/>stims.json<br/>config.json"]
+    saved["timestamped run folder<br/>simulation.parquet primary<br/>simulation.pkl legacy/debug<br/>simulation_params.json<br/>stims.json<br/>config.json"]
 
     noisy["optional noisy simulations<br/>sample noisy parameter dictionaries<br/>noisy_total_cells default 350<br/>250 random + 100 repetitive by default"]
-    noisy_saved["noisy/sim_i folders<br/>simulation.pkl<br/>simulation_params.json<br/>stims.json<br/>config.json"]
+    noisy_saved["noisy/sim_i folders<br/>simulation.parquet<br/>simulation.pkl legacy/debug<br/>simulation_params.json<br/>stims.json<br/>config.json"]
 
-    train["optional downstream training<br/>pipeline.training"]
+    train["optional downstream training<br/>forecaster_training.train_forecaster"]
     preprocess["forecaster preprocessing<br/>sample input/expression traces<br/>at sample_interval_minutes"]
     model["model artifacts in run folder<br/>models/model.pkl<br/>models/config.json<br/>metrics"]
 
@@ -97,7 +97,7 @@ from aisam.utils.pipeline import training
 result = training("/path/to/run_root")
 ```
 
-The standard simulation is saved under `root_folder/training_data/{label}_{timestamp}/`. If `noisy_sims` is greater than zero, noisy simulations are saved under that run folder in `noisy/sim_i/`. The forecaster model is trained only on the standard simulation data from the standard pipeline, then saved under the same run folder in `models/`.
+The standard simulation is saved under `root_folder/training_data/{label}_{timestamp}/`. The primary data artifact is `simulation.parquet`, a long-form table with columns `cell_id`, `realization`, `species`, `stim`, `time`, and `value`. `simulation.pkl` is still written by default as a legacy/debug artifact. If `noisy_sims` is greater than zero, noisy simulations are saved under that run folder in `noisy/sim_i/`. Forecaster training reads the parquet file by default and saves model artifacts under the run folder in `models/`.
 
 ## Recipe-based experiment
 
@@ -105,6 +105,7 @@ An entire experiment can also be defined with `recipe.json` in the run root. If 
 
 ```json
 {
+  "mode": "full",
   "circuit": "ccasr",
   "simulation_model": "gillespy_tau_hybrid",
   "forecaster_model": {
@@ -129,16 +130,16 @@ An entire experiment can also be defined with `recipe.json` in the run root. If 
 Run from the recipe folder:
 
 ```bash
-aisam simulate
+aisam run
 ```
 
 Or point AISAM to another recipe root:
 
 ```bash
-aisam simulate --path /path/to/run_root
+aisam run --path /path/to/run_root
 ```
 
-If only `recipe.json` exists, AISAM uses default circuit parameters stored in `aisam.model.defaults`.
+`mode` can be `simulation`, `training`, `full`, or `sanity`. `aisam simulate` remains available as a compatibility alias for `aisam run`. If only `recipe.json` exists, AISAM uses default circuit parameters stored in `aisam.model.defaults`.
 
 ## Codebase dependency graph
 

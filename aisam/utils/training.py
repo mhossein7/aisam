@@ -7,6 +7,7 @@ The implementation is organized across:
 """
 
 from aisam.utils.forecaster_training import (
+    train_forecaster,
     train_forecaster_from_simulation_config,
     train_forecaster_from_simulation,
     train_forecaster_random_stim_eval,
@@ -34,6 +35,7 @@ __all__ = [
     "run_sanity_check_simulation",
     "run_training_simulation",
     "stimulation_cell_ranges",
+    "train_forecaster",
     "train_forecaster_from_simulation",
     "train_forecaster_from_simulation_config",
     "train_forecaster_random_stim_eval",

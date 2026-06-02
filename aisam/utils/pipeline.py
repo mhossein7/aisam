@@ -5,8 +5,7 @@ from aisam.model import defaults
 from aisam.utils import aux
 from aisam.utils.forecaster_training import (
     _resolve_model_config,
-    _train_and_save_model,
-    train_forecaster_from_simulation_config,
+    train_forecaster,
 )
 from aisam.utils.simulation import (
     run_sanity_check_simulation,
@@ -49,10 +48,9 @@ def training(
         config,
         total_cell=total_cell,
         noisy_total_cells=noisy_total_cells,
-        include_cells=True,
+        include_cells=False,
     )
     config = result["user_config"]
-    run_stamp = result["run_stamp"]
 
     model_config = _resolve_model_config(model if model is not None else config.get("model"))
     if model_config is not None:
@@ -61,26 +59,17 @@ def training(
             if include_main_periodic is not None
             else config.get("include_main_periodic", "train")
         )
-        if include_noisy != "none" or include_noisy_periodic != "none" or include_main_periodic != "train":
-            model_result = train_forecaster_from_simulation_config(
-                path=result["simulation_path"],
-                config=model_config,
-                visualization=bool(model_config.get("visualization", False)),
-                random_state=config.get("random_seed"),
-                include_noisy=include_noisy,
-                include_noisy_periodic=include_noisy_periodic,
-                include_main_periodic=include_main_periodic,
-            )
-        else:
-            model_result = _train_and_save_model(
-                model_config=model_config,
-                cells=result["cells"],
-                data_config=result["config"],
-                run_stamp=run_stamp,
-            )
+        model_result = train_forecaster(
+            path=result["simulation_path"],
+            config=model_config,
+            visualization=bool(model_config.get("visualization", False)),
+            random_state=config.get("random_seed"),
+            include_noisy=include_noisy,
+            include_noisy_periodic=include_noisy_periodic,
+            include_main_periodic=include_main_periodic,
+        )
         result["model"] = model_result
 
-    result.pop("cells", None)
     return result
 
 
@@ -98,10 +87,12 @@ def run_recipe(root_folder=None, progress=None):
     root = recipe_config["root_folder"]
     if progress is not None:
         config["progress"] = bool(progress)
+    mode = _recipe_mode(recipe)
 
     result = {
         "root_folder": root,
         "recipe_path": recipe_config["recipe_path"],
+        "mode": mode or "custom",
         "config": config,
         "sanity": None,
         "simulation": None,
@@ -124,15 +115,32 @@ def run_recipe(root_folder=None, progress=None):
         "include_training",
         default=False,
     )
+    if mode == "sanity":
+        include_sanity = True
+        sanity_only = True
+        include_training_simulation = False
+        include_model_training = False
+    elif mode == "simulation":
+        include_training_simulation = True
+        include_model_training = False
+    elif mode == "training":
+        include_training_simulation = False
+        include_model_training = True
+    elif mode == "full":
+        include_training_simulation = True
+        include_model_training = True
 
     if include_sanity:
         result["sanity"] = run_sanity_check_simulation(config, progress=config.get("progress", True))
 
-    if not include_training_simulation:
+    if sanity_only and not include_model_training:
         return result
 
-    simulation_result = run_training_simulation(config, include_cells=True)
-    result["simulation"] = {key: value for key, value in simulation_result.items() if key != "cells"}
+    training_path = None
+    if include_training_simulation:
+        simulation_result = run_training_simulation(config, include_cells=False)
+        result["simulation"] = simulation_result
+        training_path = simulation_result["simulation_path"]
 
     if include_model_training:
         model_config = _resolve_model_config(config.get("model", {"type": "regressor"}))
@@ -145,24 +153,18 @@ def run_recipe(root_folder=None, progress=None):
             "include_noisy_periodic",
             recipe.get("include_noisy_periodic", "none"),
         )
-
-        if include_repetitive_training and include_noisy == "none" and include_noisy_periodic == "none":
-            model_result = _train_and_save_model(
-                model_config=model_config,
-                cells=simulation_result["cells"],
-                data_config=simulation_result["config"],
-                run_stamp=simulation_result["run_stamp"],
-            )
-        else:
-            model_result = train_forecaster_from_simulation_config(
-                path=simulation_result["simulation_path"],
-                config=model_config,
-                visualization=bool(model_config.get("visualization", False)),
-                random_state=config.get("random_seed"),
-                include_noisy=include_noisy,
-                include_noisy_periodic=include_noisy_periodic,
-                include_main_periodic="train" if include_repetitive_training else ("eval" if include_repetitive_eval else "none"),
-            )
+        training_path = training_path or _recipe_training_data_path(config, recipe, root)
+        model_result = train_forecaster(
+            path=training_path,
+            config=model_config,
+            visualization=bool(model_config.get("visualization", False)),
+            random_state=config.get("random_seed"),
+            include_noisy=include_noisy,
+            include_noisy_periodic=include_noisy_periodic,
+            include_main_periodic="train"
+            if include_repetitive_training
+            else ("eval" if include_repetitive_eval else "none"),
+        )
         result["model"] = model_result
 
     return result
@@ -304,6 +306,11 @@ def _config_from_recipe(recipe):
         "temperatures": ("temperatures", "noise_temperatures"),
         "random_seed": ("random_seed", "seed"),
         "progress": ("progress",),
+        "mode": ("mode", "experiment_mode", "run_mode", "pipeline_mode"),
+        "simulation_path": ("simulation_path", "simulation_file", "simulation_data_file", "data_path"),
+        "output_root": ("output_root",),
+        "save_parquet": ("save_parquet",),
+        "save_pickle": ("save_pickle",),
     }
     for target, aliases in key_map.items():
         value = _first_present(recipe, aliases)
@@ -360,6 +367,39 @@ def _recipe_bool(recipe, *keys, default=False):
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
+
+
+def _recipe_mode(recipe):
+    value = _first_present(recipe, ("mode", "experiment_mode", "run_mode", "pipeline_mode"))
+    if value is None:
+        return None
+    value = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "sim": "simulation",
+        "simulate": "simulation",
+        "train": "training",
+        "model_training": "training",
+        "pipeline": "full",
+        "full_pipeline": "full",
+        "simulation_and_training": "full",
+        "sanity_check": "sanity",
+    }
+    value = aliases.get(value, value)
+    if value not in {"sanity", "simulation", "training", "full"}:
+        raise ValueError("Recipe mode must be one of: sanity, simulation, training, full.")
+    return value
+
+
+def _recipe_training_data_path(config, recipe, root):
+    for mapping in (config, recipe):
+        value = _first_present(
+            mapping,
+            ("simulation_path", "simulation_file", "simulation_data_file", "data_path"),
+        )
+        if value:
+            path = Path(value)
+            return path if path.is_absolute() else Path(root) / path
+    return root
 
 
 def _first_present(mapping, keys):

@@ -441,9 +441,32 @@ def _run_and_save_simulation(
         interval_minutes=sample_interval_minutes,
     )
 
-    simulation_path = run_dir / "simulation.pkl"
-    with open(simulation_path, "wb") as f:
-        dill.dump(xpt.Cells, f)
+    save_parquet = bool(user_config.get("save_parquet", True))
+    save_pickle = bool(user_config.get("save_pickle", True))
+    if not save_parquet and not save_pickle:
+        raise ValueError("At least one of save_parquet or save_pickle must be enabled.")
+
+    parquet_path = None
+    if save_parquet:
+        parquet_path = run_dir / "simulation.parquet"
+        time_step_minutes = (
+            sample_interval_minutes
+            if sample_interval_minutes is not None
+            else 1.0 / float(saved_sampling)
+        )
+        save_simulation_dataframe(
+            xpt.Cells,
+            parquet_path,
+            time_step_minutes=time_step_minutes,
+        )
+
+    pickle_path = None
+    if save_pickle:
+        pickle_path = run_dir / "simulation.pkl"
+        with open(pickle_path, "wb") as f:
+            dill.dump(xpt.Cells, f)
+
+    simulation_path = parquet_path or pickle_path
 
     params_path = run_dir / "simulation_params.json"
     with open(params_path, "w") as f:
@@ -459,8 +482,13 @@ def _run_and_save_simulation(
         "run_dir": str(run_dir),
         "circuit_parameters": _json_safe(params),
         "simulation_file": str(simulation_path),
+        "simulation_data_file": str(simulation_path),
+        "simulation_parquet_file": str(parquet_path) if parquet_path is not None else None,
+        "simulation_pickle_file": str(pickle_path) if pickle_path is not None else None,
         "simulation_params_file": str(params_path),
         "stims_file": str(stims_path),
+        "data_format": "parquet_long_v1" if parquet_path is not None else "cell_pickle_v1",
+        "data_columns": ["cell_id", "realization", "species", "stim", "time", "value"],
         "simulated_cells": {
             **stimulation_cell_ranges(
                 num_cells,
@@ -487,12 +515,132 @@ def _run_and_save_simulation(
     return {
         "run_dir": run_dir,
         "simulation_path": simulation_path,
+        "data_path": simulation_path,
+        "parquet_path": parquet_path,
+        "simulation_pickle_path": pickle_path,
         "params_path": params_path,
         "stims_path": stims_path,
         "config_path": config_path,
         "config": config_dump,
         "cells": xpt.Cells,
     }
+
+
+def save_simulation_dataframe(cells, path, time_step_minutes=5, value_column="value"):
+    """
+    Save Cell_sim outputs as a long-form parquet table.
+
+    The primary schema is:
+    cell_id, realization, species, stim, time, value
+    """
+    dataframe = cells_to_simulation_dataframe(
+        cells,
+        time_step_minutes=time_step_minutes,
+        value_column=value_column,
+    )
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dataframe.to_parquet(path, index=False)
+    return path
+
+
+def cells_to_simulation_dataframe(cells, time_step_minutes=5, value_column="value"):
+    """
+    Convert saved Cell_sim objects into a long-form pandas dataframe.
+
+    Each row is one cell/realization/species/time observation. `stim` is the
+    stimulation value active at that time point.
+    """
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError(
+            "Saving simulation parquet files requires pandas. Install pandas "
+            "and pyarrow, or set save_parquet=false in the run config."
+        ) from exc
+
+    frames = []
+    for cell_id in _sorted_cell_ids(cells):
+        cell = cells[cell_id]
+        for run_index, stim_vec in enumerate(cell.stims):
+            trace_length = _cell_run_trace_length(cell, run_index)
+            stim_trace = _expand_stim_to_trace(stim_vec, trace_length).reshape(-1)
+            time_values = _time_values(trace_length, time_step_minutes)
+            num_realizations = _cell_num_realizations(cell, run_index)
+
+            for species, runs in cell.expressions.items():
+                species_runs = _as_trace_matrix(runs[run_index])
+                if species_runs.shape[1] != trace_length:
+                    raise ValueError(
+                        f"Species {species!r} in cell {cell_id!r} has trace length "
+                        f"{species_runs.shape[1]}, expected {trace_length}."
+                    )
+
+                for realization_index in range(num_realizations):
+                    source_index = 0 if species_runs.shape[0] == 1 else realization_index
+                    frames.append(
+                        pd.DataFrame(
+                            {
+                                "cell_id": _table_cell_id(cell_id),
+                                "realization": realization_index + 1,
+                                "species": species,
+                                "stim": stim_trace,
+                                "time": time_values,
+                                value_column: species_runs[source_index].astype(float),
+                            }
+                        )
+                    )
+
+    if not frames:
+        return pd.DataFrame(
+            columns=["cell_id", "realization", "species", "stim", "time", value_column]
+        )
+    dataframe = pd.concat(frames, ignore_index=True)
+    return dataframe[["cell_id", "realization", "species", "stim", "time", value_column]]
+
+
+def _cell_num_realizations(cell, run_index):
+    num_realizations = 1
+    for runs in cell.expressions.values():
+        values = _as_trace_matrix(runs[run_index])
+        num_realizations = max(num_realizations, values.shape[0])
+    return num_realizations
+
+
+def _as_trace_matrix(values):
+    array = np.asarray(values, dtype=float)
+    if array.ndim == 1:
+        return array.reshape(1, -1)
+    if array.ndim == 2:
+        return array
+    raise ValueError(f"Expected a 1D or 2D expression trace, got shape {array.shape}.")
+
+
+def _time_values(trace_length, time_step_minutes):
+    if time_step_minutes is None:
+        time_step_minutes = 1
+    values = np.arange(trace_length, dtype=float) * float(time_step_minutes)
+    rounded = np.round(values)
+    if np.allclose(values, rounded):
+        return rounded.astype(int)
+    return values
+
+
+def _table_cell_id(cell_id):
+    try:
+        return int(cell_id)
+    except (TypeError, ValueError):
+        return str(cell_id)
+
+
+def _sorted_cell_ids(cells):
+    def key(cell_id):
+        try:
+            return int(cell_id)
+        except (TypeError, ValueError):
+            return str(cell_id)
+
+    return sorted(cells.keys(), key=key)
 
 
 def _load_config(config):
