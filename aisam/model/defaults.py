@@ -18,6 +18,16 @@ DEFAULT_CIRCUIT_PARAMS = {
         "t_max": 960,
         "sampling": 10,
     },
+    "ccasr_noe": {
+        "delta": 0.01,
+        "alpha": 1,
+        "k": 0.4851,
+        "tau_delay": 12,
+        "n": 3.6,
+        "c2": 0.0631,
+        "t_max": 960,
+        "sampling": 10,
+    },
     "inverter": {
         "delta": 0.01,
         "alpha": 0.1,
@@ -33,18 +43,79 @@ DEFAULT_CIRCUIT_PARAMS = {
         "t_max": 960,
         "sampling": 10,
     },
+    "inverter_noe": {
+        "delta": 0.01,
+        "alpha": 0.1,
+        "beta": 1,
+        "k": 0.4851,
+        "k_tet": 5,
+        "tau_delay": 12,
+        "n": 3.6,
+        "n_tet": 2,
+        "c2": 0.0631,
+        "t_max": 960,
+        "sampling": 10,
+    },
+    "ccasr_ode": {
+        "delta": 0.01,
+        "alpha": 1,
+        "k": 0.4851,
+        "tau_delay": 12,
+        "n": 3.6,
+        "c2": 0.0631,
+        "t_max": 960,
+        "sampling": 10,
+        "x0": [0, 0],
+    },
+    "ode_inverter": {
+        "delta": 0.01,
+        "alpha": 0.1,
+        "beta": 1,
+        "k": 0.4851,
+        "k_tet": 5,
+        "tau_delay": 12,
+        "n": 3.6,
+        "n_tet": 2,
+        "c2": 0.0631,
+        "t_max": 960,
+        "sampling": 10,
+        "x0": [0, 0, 0],
+    },
 }
 
 _ALIASES = {
     "ccasr": "ccasr",
     "ccasr_inverter": "inverter",
-    "ccasr-inverter": "inverter",
     "inverter": "inverter",
+    "ccasr_noe": "ccasr_noe",
+    "ccasr_no_e": "ccasr_noe",
+    "ccasrnoe": "ccasr_noe",
+    "noe_ccasr": "ccasr_noe",
+    "ccasr_ode": "ccasr_ode",
+    "ode_ccasr": "ccasr_ode",
+    "ode_ccasr_noe": "ccasr_ode",
+    "ccasr_noe_ode": "ccasr_ode",
+    "inverter_noe": "inverter_noe",
+    "inverter_no_e": "inverter_noe",
+    "inverternoe": "inverter_noe",
+    "ccasr_inverter_noe": "inverter_noe",
+    "ccasr_inverter_no_e": "inverter_noe",
+    "ode_inverter": "ode_inverter",
+    "inverter_ode": "ode_inverter",
+    "ode_inverter_ccasr": "ode_inverter",
+    "ode_ccasr_inverter": "ode_inverter",
+    "ccasr_inverter_ode": "ode_inverter",
+    "ode_inverter_noe": "ode_inverter",
 }
 
 
 def normalize_circuit_name(circuit):
-    return _ALIASES.get(str(circuit).lower(), str(circuit).lower())
+    circuit_key = str(circuit).strip().lower().replace("-", "_").replace(" ", "_")
+    return _ALIASES.get(circuit_key, circuit_key)
+
+
+def is_supported_circuit(circuit):
+    return normalize_circuit_name(circuit) in DEFAULT_CIRCUIT_PARAMS
 
 
 def default_circuit_params(circuit):

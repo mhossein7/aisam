@@ -6,7 +6,7 @@ from pathlib import Path
 import dill
 import numpy as np
 
-from aisam.model import sims
+from aisam.model import defaults, sims
 from aisam.utils import aux
 
 
@@ -21,7 +21,9 @@ def run_sanity_check_simulation(config, species=None, num_realizations=None, pro
 
     config, source_root, _ = _load_simulation_config_from_root(config)
     params = _load_params_from_config(config, source_root=source_root)
-    label = config.get("label", config.get("circuit", "CcaSR"))
+    label = _resolve_simulation_circuit(config)
+    config["circuit"] = label
+    config["label"] = label
     t_max = int(config.get("t_max", params.get("t_max")))
     sampling = int(config.get("sampling", params.get("sampling", 10)))
     sample_interval = _sample_interval_from_config(config)
@@ -135,6 +137,8 @@ def run_training_simulation(
 
     if label is not None:
         config["label"] = label
+        if defaults.is_supported_circuit(label):
+            config["circuit"] = defaults.normalize_circuit_name(label)
     if output_root is not None:
         config["output_root"] = str(output_root)
     if random_seed is not None:
@@ -150,7 +154,9 @@ def run_training_simulation(
     if temperatures is not None:
         config["temperatures"] = temperatures
 
-    label = config.get("label", config.get("circuit", "CcaSR"))
+    label = _resolve_simulation_circuit(config)
+    config["circuit"] = label
+    config["label"] = label
     total_cells = _resolve_total_cells(config, default=1000)
     noisy_total_cells = _resolve_total_cells(
         config,
@@ -700,6 +706,13 @@ def _load_params_from_config(config, source_root=None):
         raise ValueError("Provide params, circuit_parameters, params_path, or root_folder.")
 
     return aux.load_params(params_path)
+
+
+def _resolve_simulation_circuit(config):
+    simulation_model = config.get("simulation_model")
+    if defaults.is_supported_circuit(simulation_model):
+        return defaults.normalize_circuit_name(simulation_model)
+    return defaults.normalize_circuit_name(config.get("circuit", config.get("label", "ccasr")))
 
 
 def _json_safe(value):

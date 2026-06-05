@@ -1,6 +1,6 @@
 import numpy as np
 import aisam
-from aisam.model import models
+from aisam.model import defaults, models
 from aisam.utils import aux
 import json
 import os
@@ -23,12 +23,21 @@ class Cell_sim():
         
     def assign_model(self):
         if not self.circuit_params: raise Exception("Please first assign parameters to the Cell")
-        if self.circuit.lower() == 'ccasr':
-            circuit_model = models.CcaSR(self.circuit_params)
-        elif self.circuit.lower() == 'inverter':
-            circuit_model = models.CcaSR_Inverter(self.circuit_params)
-        else: 
-            raise ValueError("Model not implemented yet")
+        self.circuit = defaults.normalize_circuit_name(self.circuit)
+        model_factories = {
+            "ccasr": models.CcaSR,
+            "inverter": models.CcaSR_Inverter,
+            "ccasr_noe": models.CcaSR_noE,
+            "inverter_noe": models.CcaSR_Inverter_noE,
+            "ccasr_ode": models.ODE_CcaSR,
+            "inverter_ode": models.ODE_CcaSR_Inverter,
+        }
+        if self.circuit not in model_factories:
+            raise ValueError(
+                f"Model {self.circuit!r} is not implemented yet. "
+                f"Available models: {sorted(model_factories)}"
+            )
+        circuit_model = model_factories[self.circuit](self.circuit_params)
         
         self.model = copy.deepcopy(circuit_model)
         
@@ -49,7 +58,15 @@ class Cell_sim():
             raise ValueError("Parameter input must be either a dictionary or a JSON file path string.")
     
     def assign_features(self):
-        for species in self.model.get_all_species().keys():
+        self.species = []
+        self.expressions = {}
+        if hasattr(self.model, "get_all_species"):
+            species_names = self.model.get_all_species().keys()
+        elif hasattr(self.model, "species"):
+            species_names = self.model.species
+        else:
+            raise ValueError(f"Model {self.circuit!r} does not expose species metadata.")
+        for species in species_names:
             self.species.append(species)
         for species in self.species:
             self.expressions[species] = []

@@ -3,6 +3,16 @@ import numpy as np
 from types import SimpleNamespace
 from scipy import integrate
 
+
+def add_multiplicative_noise(arrays, mean=1.0, sd=0.05, seed=None):
+    rng = np.random.default_rng(seed)
+
+    return [
+        arr * rng.normal(loc=mean, scale=sd, size=arr.shape)
+        for arr in arrays
+    ]
+
+
 class Simple(gillespy2.Model):
     def __init__(self,params,t_max,stim_vec):
         super().__init__(name='Simple_rxn')
@@ -219,27 +229,150 @@ class CcaSR_Inverter(RXN):
         F_d = gillespy2.Reaction(name="F_dissociation", propensity_function='delta*F', reactants={F:1}, products={})
     
         self.add_reaction([H_c,H_d,E_c,E_d,T_c,T_d,F_c,F_d])
+
+
+
+class CcaSR_noE(RXN):
+    def __init__(self,params):
+        super().__init__(name='CcaSR')
+        self.params = params
+        self.t_max = params['t_max']
+        self.sampling = params['sampling']
+
+    
+    def init_rxn(self):
+        params = SimpleNamespace(**self.params)
+        alpha = params.alpha 
+        k = params.k 
+        n = params.n 
+        tau_delay = params.tau_delay
+        c2 = params.c2
+        delta = params.delta
+
+        alpha_g = gillespy2.Parameter(name='alpha', expression=alpha)
+        delta_g = gillespy2.Parameter(name='delta', expression=delta)
+        c2_g = gillespy2.Parameter(name='c2', expression=c2)
+        k_g = gillespy2.Parameter(name='k', expression=k)
+        n_g = gillespy2.Parameter(name='n', expression=n)
+        tau_delay_g = gillespy2.Parameter(name='tau_delay', expression=tau_delay)
+        
+        self.add_parameter([alpha_g,delta_g,c2_g,k_g,n_g,tau_delay_g])
+
+        
+        U = gillespy2.Species(name='U', initial_value=0,mode='discrete')
+        H = gillespy2.Species(name='H', initial_value=0,mode='discrete')
+        F = gillespy2.Species(name='F',   initial_value=0,mode='discrete')
+        self.reporter_species = 'F'
+        self.input_species = 'U'
+        self.add_species([U,H,F])
+
+        # The list of reactants and products for a Reaction object are each a
+        # Python dictionary in which the dictionary keys are Species objects
+        # and the values are stoichiometries of the species in the reaction.
+        H_c = gillespy2.Reaction(name="H_creation", propensity_function= 'U', reactants={}, products={H:1})
+        H_d = gillespy2.Reaction(name="H_dissociation", propensity_function='c2*H', reactants={H:1}, products={})
+        F_c = gillespy2.Reaction(name="F_creation", propensity_function= 'alpha*(pow(c2*H,n)/(k+pow(c2*H,n)))', reactants={}, products={F:1})
+        F_d = gillespy2.Reaction(name="F_dissociation", propensity_function='delta*F', reactants={F:1}, products={})
+    
+        self.add_reaction([H_c,H_d,F_c,F_d])
+   
+    
+    
+class CcaSR_Inverter_noE(RXN):
+    def __init__(self,params):
+        super().__init__(name='CcaSR_Inverter')
+        self.params = params
+        self.t_max = params['t_max']
+        self.sampling = params['sampling']
+
+    
+    def init_rxn(self):
+        params = SimpleNamespace(**self.params)
+        alpha = params.alpha 
+        beta = params.beta
+        k_tet = params.k_tet 
+        k = params.k 
+        n = params.n 
+        n_tet = params.n_tet
+        tau_delay = params.tau_delay
+        c2 = params.c2
+        delta = params.delta
+
+        alpha_g = gillespy2.Parameter(name='alpha', expression=alpha)
+        beta_g = gillespy2.Parameter(name='beta', expression=beta)
+        delta_g = gillespy2.Parameter(name='delta', expression=delta)
+        c2_g = gillespy2.Parameter(name='c2', expression=c2)
+        k_g = gillespy2.Parameter(name='k', expression=k)
+        k_tet_g = gillespy2.Parameter(name='k_tet', expression=k_tet)
+        n_g = gillespy2.Parameter(name='n', expression=n)
+        n_tet_g = gillespy2.Parameter(name='n_tet', expression=n_tet)
+        tau_delay_g = gillespy2.Parameter(name='tau_delay', expression=tau_delay)
+        unit = gillespy2.Parameter(name = 'unit', expression=1)
+        self.add_parameter([alpha_g,beta_g,delta_g,c2_g,k_g,k_tet_g,n_g,n_tet_g,tau_delay_g,unit])
+
+        
+        U = gillespy2.Species(name='U', initial_value=0,mode='discrete')
+        H = gillespy2.Species(name='H', initial_value=0,mode='discrete')
+        T = gillespy2.Species(name='T',   initial_value=0,mode='discrete')
+        F = gillespy2.Species(name='F',   initial_value=0,mode='discrete')
+        
+        self.reporter_species = 'F'
+        self.input_species = 'U'
+        self.add_species([U,H,T,F])
+        
+        # The list of reactants and products for a Reaction object are each a
+        # Python dictionary in which the dictionary keys are Species objects
+        # and the values are stoichiometries of the species in the reaction.
+        H_c = gillespy2.Reaction(name="H_creation", propensity_function= 'U', reactants={}, products={H:1})
+        H_d = gillespy2.Reaction(name="H_dissociation", propensity_function='c2*H', reactants={H:1}, products={})
+        T_c = gillespy2.Reaction(name="T_creation", propensity_function= 'alpha*(pow(c2*H,n)/(k+pow(c2*H,n)))', reactants={}, products={T:1})
+        T_d = gillespy2.Reaction(name="T_dissociation", propensity_function='delta*T', reactants={T:1}, products={})
+        F_c = gillespy2.Reaction(name="F_creation", propensity_function= 'beta*(unit/(unit+pow(T/k_tet,n_tet)))', reactants={}, products={F:1})
+        F_d = gillespy2.Reaction(name="F_dissociation", propensity_function='delta*F', reactants={F:1}, products={})
+    
+        self.add_reaction([H_c,H_d,T_c,T_d,F_c,F_d])
+        
+
+
         
    
 
 class ODE_CcaSR():
-    def __init__(self,params,t_max,sampling = 10):
-        self.params = params
-        self.t_max = t_max
-        self.sampling = sampling
+    def __init__(self,params,t_max=None,sampling=None,measurement_noise=None,std=None,x0=None):
+        self.species = []
+        self.reporter_species = None
+        self.input_species = None
+        self.params = dict(params)
+        self.t_max = int(t_max if t_max is not None else self.params["t_max"])
+        self.sampling = int(sampling if sampling is not None else self.params.get("sampling", 10))
+        self.measurement_noise = bool(
+            self.params.get("measurement_noise", False)
+            if measurement_noise is None
+            else measurement_noise
+        )
+        self.std = std if std is not None else self.params.get("std", 0.05)
+        self.results = None
+        self.x0 = list(x0 if x0 is not None else self.params.get("x0", [0, 0]))
+        
+    def init_rxn(self):
         params = SimpleNamespace(**self.params)
         self.alpha = params.alpha 
-        self.beta = params.beta
-        self.k_tet = params.k_tet 
         self.k = params.k 
         self.n = params.n 
-        self.n_tet = params.n_tet
         self.tau_delay = params.tau_delay
-        self.h1 = params.h1 
-        self.h2 = params.h2 
         self.c2 = params.c2
         self.delta = params.delta
         
+        self.species = ['H', 'F']
+        self.reporter_species = 'F'
+        self.input_species = 'U'
+        
+        self.results = {f'{specie}':[] for specie in self.species}
+        self.initial_values = {f'{specie}':self.x0[i] for i,specie in enumerate(self.species)}
+
+    def get_all_species(self):
+        return {species: None for species in self.species}
+
     def rxn(self,x,t,U):
         H,F = x
         ind_t = min(max(0,int(np.floor((t-self.tau_delay)/5))), len(U)-1)
@@ -248,16 +381,46 @@ class ODE_CcaSR():
         return [dHdt,dFdt] 
         
     def solve(self,stim,x0):
-        t = np.linspace(0,self.t_max,self.t_max*self.sampling,endpoint=True)
+        t = np.linspace(0,self.t_max,max(2, int(self.t_max*self.sampling)),endpoint=True)
         x = integrate.odeint(self.rxn,x0,t,args=(stim,))
-        return x
+        
+        run_results = {}
+        for index , species in enumerate(self.species):
+            run_results[species] = np.asarray(x[:,index])
+
+        if self.measurement_noise:
+            run_results[self.reporter_species] = add_multiplicative_noise(
+                [run_results[self.reporter_species]],
+                sd=self.std,
+            )[0]
+            
+        self.results = run_results
+        return run_results
+    
+    def run_multi_rxn(self,stim_vec,num_trajectories = 1):
+        if num_trajectories == 1:
+            return self.solve(stim_vec,list(self.x0))
+        return [self.solve(stim_vec,list(self.x0)) for _ in range(num_trajectories)]
 
 
 class ODE_CcaSR_Inverter():
-    def __init__(self,params,t_max,sampling = 10):
-        self.params = params
-        self.t_max = t_max
-        self.sampling = sampling
+    def __init__(self,params,t_max=None,sampling=None,measurement_noise=None,std=None, x0=None):
+        self.species = []
+        self.reporter_species = None
+        self.input_species = None
+        self.params = dict(params)
+        self.t_max = int(t_max if t_max is not None else self.params["t_max"])
+        self.sampling = int(sampling if sampling is not None else self.params.get("sampling", 10))
+        self.measurement_noise = bool(
+            self.params.get("measurement_noise", False)
+            if measurement_noise is None
+            else measurement_noise
+        )
+        self.std = std if std is not None else self.params.get("std", 0.05)
+        self.results = None
+        self.x0 = list(x0 if x0 is not None else self.params.get("x0", [0, 0, 0]))
+        
+    def init_rxn(self):
         params = SimpleNamespace(**self.params)
         self.alpha = params.alpha 
         self.beta = params.beta
@@ -266,11 +429,19 @@ class ODE_CcaSR_Inverter():
         self.n = params.n 
         self.n_tet = params.n_tet
         self.tau_delay = params.tau_delay
-        self.h1 = params.h1 
-        self.h2 = params.h2 
         self.c2 = params.c2
         self.delta = params.delta
+    
+        self.species = ['H', 'T', 'F']
+        self.reporter_species = 'F'
+        self.input_species = 'U'
         
+        self.results = {f'{specie}':[] for specie in self.species}
+        self.initial_values = {f'{specie}':self.x0[i] for i,specie in enumerate(self.species)}
+    
+    def get_all_species(self):
+        return {species: None for species in self.species}
+    
     def rxn(self,x,t,U):
         H,T,F = x
         ind_t = min(max(0,int(np.floor((t-self.tau_delay)/5))), len(U)-1)
@@ -280,10 +451,29 @@ class ODE_CcaSR_Inverter():
         return [dHdt,dTdt,dFdt] 
         
     def solve(self,stim,x0):
-        t = np.linspace(0,self.t_max,self.t_max*self.sampling,endpoint=True)
+        t = np.linspace(0,self.t_max,max(2, int(self.t_max*self.sampling)),endpoint=True)
         x = integrate.odeint(self.rxn,x0,t,args=(stim,))
-        return x
+        
+        run_results = {}
+        for index , species in enumerate(self.species):
+            run_results[species] = np.asarray(x[:,index])
 
+        if self.measurement_noise:
+            run_results[self.reporter_species] = add_multiplicative_noise(
+                [run_results[self.reporter_species]],
+                sd=self.std,
+            )[0]
+            
+        self.results = run_results
+        return run_results
+
+    def run_multi_rxn(self,stim_vec,num_trajectories = 1):
+        if num_trajectories == 1:
+            return self.solve(stim_vec,list(self.x0))
+        return [self.solve(stim_vec,list(self.x0)) for _ in range(num_trajectories)]
+
+
+ODE_Inverter_CcaSR = ODE_CcaSR_Inverter
 
 
 class Simple_spring_mass():

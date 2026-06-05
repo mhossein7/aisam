@@ -3,9 +3,13 @@ import json
 from os import PathLike
 from pathlib import Path
 
+from aisam.model import defaults
+
 CIRCUIT_PARAMETER_SCHEMAS = {
     "simple": ["delta"],
     "ccasr": ["alpha", "k", "n", "tau_delay", "h1", "h2", "c2", "delta"],
+    "ccasr_noe": ["alpha", "k", "n", "tau_delay", "c2", "delta"],
+    "ccasr_ode": ["alpha", "k", "n", "tau_delay", "c2", "delta"],
     "inverter": [
         "alpha",
         "beta",
@@ -16,6 +20,28 @@ CIRCUIT_PARAMETER_SCHEMAS = {
         "tau_delay",
         "h1",
         "h2",
+        "c2",
+        "delta",
+    ],
+    "inverter_noe": [
+        "alpha",
+        "beta",
+        "k_tet",
+        "k",
+        "n",
+        "n_tet",
+        "tau_delay",
+        "c2",
+        "delta",
+    ],
+    "ode_inverter": [
+        "alpha",
+        "beta",
+        "k_tet",
+        "k",
+        "n",
+        "n_tet",
+        "tau_delay",
         "c2",
         "delta",
     ],
@@ -101,16 +127,15 @@ def config_generator(
     Generate a simulation/training config file for a supported circuit.
 
     Circuit parameters can be passed either through `params={...}` or directly
-    as keyword arguments. Known circuit schemas are `ccasr`, `inverter`, and
-    `simple`. Extra keyword arguments are preserved in the config as additional
-    hyperparameters.
+    as keyword arguments. Extra keyword arguments are preserved in the config as
+    additional hyperparameters.
 
     Returns `(config_path, config)`.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    circuit_key = circuit.lower()
+    circuit_key = defaults.normalize_circuit_name(circuit)
     required_params = CIRCUIT_PARAMETER_SCHEMAS.get(circuit_key)
     if required_params is None:
         raise ValueError(
@@ -122,6 +147,10 @@ def config_generator(
     for key in required_params:
         if key in kwargs:
             circuit_params[key] = kwargs.pop(key)
+    if circuit_key in {"ccasr_ode", "ode_inverter"}:
+        for key in ("x0", "measurement_noise", "std"):
+            if key in kwargs:
+                circuit_params[key] = kwargs.pop(key)
 
     missing = [key for key in required_params if key not in circuit_params]
     if missing:
@@ -146,8 +175,8 @@ def config_generator(
         root_folder += "/"
 
     config = {
-        "circuit": circuit,
-        "label": circuit,
+        "circuit": circuit_key,
+        "label": circuit_key,
         "t_max": t_max,
         "sampling": sampling,
         "interval_rate":interval_rate,

@@ -197,10 +197,19 @@ def load_experiment_recipe(root_folder=None):
     config = {**recipe_base, **file_config}
     config["root_folder"] = str(root)
 
-    circuit = config.get("circuit", config.get("label", recipe.get("circuit", "ccasr")))
+    simulation_model = config.get(
+        "simulation_model",
+        recipe.get("simulation_model", recipe.get("simulator", "gillespy_tau_hybrid")),
+    )
+    circuit = config.get("circuit", config.get("label", recipe.get("circuit")))
+    if defaults.is_supported_circuit(simulation_model):
+        circuit = simulation_model
+    if circuit is None:
+        circuit = "ccasr"
     circuit = defaults.normalize_circuit_name(circuit)
     config["circuit"] = circuit
-    config.setdefault("label", circuit)
+    if config.get("label") is None or defaults.is_supported_circuit(config.get("label")):
+        config["label"] = circuit
 
     params = defaults.default_circuit_params(circuit)
     params.update(_recipe_params(recipe))
@@ -254,10 +263,6 @@ def load_experiment_recipe(root_folder=None):
         bool(config["include_repetitive_stims_in_training"] or config["include_repetitive_eval"]),
     )
 
-    simulation_model = config.get(
-        "simulation_model",
-        recipe.get("simulation_model", recipe.get("simulator", "gillespy_tau_hybrid")),
-    )
     config["simulation_model"] = simulation_model
     _validate_simulation_model(simulation_model)
 
@@ -410,6 +415,8 @@ def _first_present(mapping, keys):
 
 
 def _validate_simulation_model(simulation_model):
+    if defaults.is_supported_circuit(simulation_model):
+        return
     model_key = str(simulation_model).strip().lower().replace(" ", "")
     supported = {
         "gillespy",
