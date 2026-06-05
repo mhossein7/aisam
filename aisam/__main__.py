@@ -4,7 +4,7 @@ from os import PathLike
 
 import numpy as np
 
-from aisam.utils.forecaster_training import train_forecaster
+from aisam.utils.forecaster_training import cross_test_forecaster, train_forecaster
 from aisam.utils.pipeline import run_recipe
 
 
@@ -21,6 +21,11 @@ def main(argv=None):
         help="Compatibility command for policy-driven training from existing simulation data.",
     )
     _add_train_args(train)
+    predict = subparsers.add_parser(
+        "predict",
+        help="Train/load a forecaster and evaluate it on an external simulation dataset.",
+    )
+    _add_predict_args(predict)
 
     args = parser.parse_args(argv)
     if args.command in {"run", "simulate"}:
@@ -36,6 +41,20 @@ def main(argv=None):
             random_state=args.random_state,
             include_noisy=args.include_noisy,
             include_noisy_periodic=args.include_noisy_periodic,
+            include_main_periodic=args.include_main_periodic,
+            label=args.label,
+        )
+        print(json.dumps(_json_safe(result), indent=2))
+        return 0
+    if args.command == "predict":
+        result = cross_test_forecaster(
+            model=args.model,
+            training_data=args.training_data,
+            test_data=args.test_data,
+            trained_model=args.trained_model,
+            output_root=args.output_root,
+            visualization=args.visualization,
+            random_state=args.random_state,
             include_main_periodic=args.include_main_periodic,
             label=args.label,
         )
@@ -108,6 +127,57 @@ def _add_train_args(parser):
         "--visualization",
         action="store_true",
         help="Save representative examples and error distribution plots.",
+    )
+
+
+def _add_predict_args(parser):
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Forecaster model type or model config JSON path, e.g. regressor or lstm_encoder_decoder.",
+    )
+    parser.add_argument(
+        "--training-data",
+        default=None,
+        help="Training simulation parquet/pickle path or run folder.",
+    )
+    parser.add_argument(
+        "--test-data",
+        required=True,
+        help="External test simulation parquet/pickle path or run folder.",
+    )
+    parser.add_argument(
+        "--trained-model",
+        default=None,
+        help="Path to an existing trained model.pkl. Skips model training.",
+    )
+    parser.add_argument(
+        "--include-main-periodic",
+        default="eval",
+        choices=("train", "eval", "none"),
+        help="Use training-data periodic/repetitive cells for training, evaluation, or ignore them.",
+    )
+    parser.add_argument(
+        "--output-root",
+        default=None,
+        help="Optional folder where cross-testing outputs should be saved.",
+    )
+    parser.add_argument(
+        "--label",
+        default=None,
+        help="Optional model label used in the cross-testing output path.",
+    )
+    parser.add_argument(
+        "--random-state",
+        type=int,
+        default=None,
+        help="Optional random seed for train/holdout split and example selection.",
+    )
+    parser.add_argument(
+        "--visualization",
+        action="store_true",
+        default=None,
+        help="Save training-holdout and test plots. Enabled by default for predict.",
     )
 
 

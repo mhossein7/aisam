@@ -7,6 +7,7 @@ The implementation is organized across:
 """
 
 from aisam.utils.forecaster_training import (
+    cross_test_forecaster,
     train_forecaster,
     train_forecaster_from_simulation_config,
     train_forecaster_from_simulation,
@@ -31,6 +32,7 @@ __all__ = [
     "default_models_root",
     "default_training_data_root",
     "load_experiment_recipe",
+    "cross_test_forecaster",
     "run_recipe",
     "run_sanity_check_simulation",
     "run_training_simulation",

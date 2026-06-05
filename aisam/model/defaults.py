@@ -108,6 +108,21 @@ _ALIASES = {
     "ode_inverter_noe": "ode_inverter",
 }
 
+ODE_CIRCUITS = {"ccasr_ode", "ode_inverter"}
+
+_SOLVER_ALIASES = {
+    "deterministic": "deterministic",
+    "ode": "deterministic",
+    "gillespy": "gillespy_tau_hybrid",
+    "gillespy_tau_hybrid": "gillespy_tau_hybrid",
+    "tau_hybrid": "gillespy_tau_hybrid",
+    "tauhybrid": "gillespy_tau_hybrid",
+    "stochastic": "gillespy_tau_hybrid",
+    "sde": "gillespy_tau_hybrid",
+    "sde+noise": "gillespy_tau_hybrid",
+    "sde+noise+heterogeneity": "gillespy_tau_hybrid",
+}
+
 
 def normalize_circuit_name(circuit):
     circuit_key = str(circuit).strip().lower().replace("-", "_").replace(" ", "_")
@@ -116,6 +131,30 @@ def normalize_circuit_name(circuit):
 
 def is_supported_circuit(circuit):
     return normalize_circuit_name(circuit) in DEFAULT_CIRCUIT_PARAMS
+
+
+def is_ode_circuit(circuit):
+    return normalize_circuit_name(circuit) in ODE_CIRCUITS
+
+
+def default_solver_for_circuit(circuit):
+    return "deterministic" if is_ode_circuit(circuit) else "gillespy_tau_hybrid"
+
+
+def normalize_solver_name(solver):
+    solver_key = str(solver).strip().lower().replace("-", "_").replace(" ", "_")
+    return _SOLVER_ALIASES.get(solver_key, solver_key)
+
+
+def validate_solver_for_circuit(solver, circuit):
+    solver_key = normalize_solver_name(solver)
+    expected = default_solver_for_circuit(circuit)
+    if solver_key != expected:
+        raise ValueError(
+            f"Circuit {circuit!r} expects solver {expected!r}, got {solver!r}. "
+            "Use deterministic for ODE circuits and gillespy_tau_hybrid for stochastic circuits."
+        )
+    return solver_key
 
 
 def default_circuit_params(circuit):

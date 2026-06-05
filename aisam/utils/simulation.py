@@ -24,6 +24,9 @@ def run_sanity_check_simulation(config, species=None, num_realizations=None, pro
     label = _resolve_simulation_circuit(config)
     config["circuit"] = label
     config["label"] = label
+    config["solver"] = _resolve_simulation_solver(config, label)
+    config.pop("sovler", None)
+    config.pop("simulation_model", None)
     t_max = int(config.get("t_max", params.get("t_max")))
     sampling = int(config.get("sampling", params.get("sampling", 10)))
     sample_interval = _sample_interval_from_config(config)
@@ -157,6 +160,9 @@ def run_training_simulation(
     label = _resolve_simulation_circuit(config)
     config["circuit"] = label
     config["label"] = label
+    config["solver"] = _resolve_simulation_solver(config, label)
+    config.pop("sovler", None)
+    config.pop("simulation_model", None)
     total_cells = _resolve_total_cells(config, default=1000)
     noisy_total_cells = _resolve_total_cells(
         config,
@@ -485,6 +491,7 @@ def _run_and_save_simulation(
     config_dump = {
         "created_at": run_stamp,
         "circuit": label,
+        "solver": user_config.get("solver", defaults.default_solver_for_circuit(label)),
         "run_dir": str(run_dir),
         "circuit_parameters": _json_safe(params),
         "simulation_file": str(simulation_path),
@@ -713,6 +720,20 @@ def _resolve_simulation_circuit(config):
     if defaults.is_supported_circuit(simulation_model):
         return defaults.normalize_circuit_name(simulation_model)
     return defaults.normalize_circuit_name(config.get("circuit", config.get("label", "ccasr")))
+
+
+def _resolve_simulation_solver(config, circuit):
+    solver = config.get("solver", config.get("sovler"))
+    simulation_model = config.get("simulation_model")
+    if solver is None and simulation_model is not None and not defaults.is_supported_circuit(simulation_model):
+        solver = simulation_model
+    solver = solver or defaults.default_solver_for_circuit(circuit)
+    if defaults.is_supported_circuit(solver):
+        raise ValueError(
+            f"{solver!r} is a circuit/model name. Put it in `circuit` and use `solver` "
+            "for the simulation backend."
+        )
+    return defaults.validate_solver_for_circuit(solver, circuit)
 
 
 def _json_safe(value):

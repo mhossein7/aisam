@@ -153,20 +153,20 @@ def plot_forecaster_evaluation_examples(
 
     y_true = np.asarray(dataset["y_validation"], dtype=float)
     y_pred = np.asarray(dataset["validation_predictions"], dtype=float)
-    errors = np.mean((y_true - y_pred) ** 2, axis=1)
+    per_window_rmse = np.sqrt(np.mean((y_true - y_pred) ** 2, axis=1))
 
     rng = np.random.default_rng(random_state)
     indices = {
-        "random": int(rng.integers(len(errors))),
-        "best": int(np.argmin(errors)),
-        "worst": int(np.argmax(errors)),
+        "random": int(rng.integers(len(per_window_rmse))),
+        "best": int(np.argmin(per_window_rmse)),
+        "worst": int(np.argmax(per_window_rmse)),
     }
 
     paths = {}
     for name, index in indices.items():
         meta = dataset["validation_meta"][index]
         sequence = dataset["validation_sequences"][meta["sequence_index"]]
-        save_path = output_dir / f"{name}_evaluation.svg"
+        save_path = output_dir / f"{name}_prediction.svg"
         plot_forecaster_window(
             sequence=sequence,
             time_index=meta["time_index"],
@@ -174,10 +174,10 @@ def plot_forecaster_evaluation_examples(
             ground_truth=y_true[index],
             forecaster=forecaster,
             save_path=save_path,
-            title=f"{name.title()} validation example | MSE={errors[index]:.4g}",
+            title=f"{name.title()} prediction | RMSE={per_window_rmse[index]:.4g}",
             output_species=output_species,
         )
-        paths[name] = save_path
+        paths[f"{name}_prediction"] = save_path
 
     return paths
 

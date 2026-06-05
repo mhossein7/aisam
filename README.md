@@ -23,7 +23,7 @@ Add a minimal full-pipeline `recipe.json`:
 {
   "mode": "full",
   "circuit": "ccasr",
-  "simulation_model": "gillespy_tau_hybrid",
+  "solver": "gillespy_tau_hybrid",
   "forecaster_model": {
     "type": "regressor",
     "past_feature_window": 20,
@@ -58,6 +58,7 @@ AISAM will simulate cells, save the simulation table, train the forecaster, and 
 - A folder containing `recipe.json`.
 - `mode: "full"` to run simulation and forecaster training together.
 - A circuit choice such as `ccasr`, `inverter`, `CcaSR_noE`, `CcaSR_ODE`, `Inverter_noE`, or `ODE_Inverter`.
+- A solver choice. Use `gillespy_tau_hybrid` for stochastic/GillesPy2 circuits and `deterministic` for ODE circuits.
 - Simulation size settings: `t_max`, `sampling`, `interval_rate`, `total_cell`, and `num_realizations`.
 - A `forecaster_model` block. The current standard model type is `regressor`.
 - Optional circuit parameters. If omitted, AISAM uses defaults from `aisam.model.defaults`. To override them, add a `circuit_parameters` block in the recipe or put `simulation_params.json` next to the recipe.
@@ -70,6 +71,7 @@ AISAM will simulate cells, save the simulation table, train the forecaster, and 
 {
   "mode": "full",
   "circuit": "CcaSR_noE",
+  "solver": "gillespy_tau_hybrid",
   "forecaster_model": {
     "type": "regressor",
     "past_feature_window": 20,
@@ -128,6 +130,7 @@ Simulation only:
 {
   "mode": "simulation",
   "circuit": "ccasr",
+  "solver": "gillespy_tau_hybrid",
   "t_max": 960,
   "sampling": 10,
   "interval_rate": 5,
@@ -164,11 +167,35 @@ You can also train directly from saved simulation data:
 aisam train --path /path/to/simulation.parquet --config regressor --visualization
 ```
 
+Cross-test a forecaster by training on one simulation dataset and evaluating on
+another:
+
+```bash
+aisam predict \
+  --model regressor \
+  --training-data /path/to/training_run/simulation.parquet \
+  --test-data /path/to/test_run/simulation.parquet
+```
+
+Or evaluate an existing trained model on a new simulation dataset:
+
+```bash
+aisam predict \
+  --trained-model /path/to/models/regressor_run/model.pkl \
+  --test-data /path/to/test_run/simulation.parquet
+```
+
+Cross-testing outputs are saved under `models/{model}/cross_testing/{timestamp}/`.
+They include `training_holdout_performance.json` when training-holdout data is
+available, `test_performance.json`, a combined `performance.json`, and figures
+for both `figures/training_holdout/` and `figures/test/`: `rmse_histogram.svg`,
+`best_prediction.svg`, `worst_prediction.svg`, and `random_prediction.svg`.
+
 ## Useful Recipe Fields
 
 - `mode`: `full`, `simulation`, `training`, or `sanity`.
 - `circuit`: the circuit/model family to simulate.
-- `simulation_model`: simulator/backend name, or one of the circuit model aliases.
+- `solver`: simulation backend. Use `deterministic` for ODE circuits and `gillespy_tau_hybrid` for stochastic circuits.
 - `forecaster_model`: model configuration for training.
 - `interval_rate`: saved time step in minutes for downstream training data.
 - `include_periodic_stims_in_training`: whether repetitive stimulation cells are part of training.

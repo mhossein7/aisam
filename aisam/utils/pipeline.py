@@ -197,13 +197,19 @@ def load_experiment_recipe(root_folder=None):
     config = {**recipe_base, **file_config}
     config["root_folder"] = str(root)
 
-    simulation_model = config.get(
-        "simulation_model",
-        recipe.get("simulation_model", recipe.get("simulator", "gillespy_tau_hybrid")),
+    legacy_simulation_model = config.pop("simulation_model", recipe.get("simulation_model"))
+    solver_choice = _first_present(
+        config,
+        ("solver", "sovler", "simulation_solver", "simulator"),
     )
+    if solver_choice is None and legacy_simulation_model is not None:
+        if defaults.is_supported_circuit(legacy_simulation_model):
+            solver_choice = None
+        else:
+            solver_choice = legacy_simulation_model
     circuit = config.get("circuit", config.get("label", recipe.get("circuit")))
-    if defaults.is_supported_circuit(simulation_model):
-        circuit = simulation_model
+    if defaults.is_supported_circuit(legacy_simulation_model):
+        circuit = legacy_simulation_model
     if circuit is None:
         circuit = "ccasr"
     circuit = defaults.normalize_circuit_name(circuit)
@@ -263,8 +269,8 @@ def load_experiment_recipe(root_folder=None):
         bool(config["include_repetitive_stims_in_training"] or config["include_repetitive_eval"]),
     )
 
-    config["simulation_model"] = simulation_model
-    _validate_simulation_model(simulation_model)
+    config["solver"] = _resolve_solver_for_circuit(solver_choice, circuit)
+    config.pop("sovler", None)
 
     forecaster_model = config.get(
         "forecaster_model",
@@ -312,6 +318,7 @@ def _config_from_recipe(recipe):
         "random_seed": ("random_seed", "seed"),
         "progress": ("progress",),
         "mode": ("mode", "experiment_mode", "run_mode", "pipeline_mode"),
+        "solver": ("solver", "sovler", "simulation_solver", "simulator"),
         "simulation_path": ("simulation_path", "simulation_file", "simulation_data_file", "data_path"),
         "output_root": ("output_root",),
         "save_parquet": ("save_parquet",),
@@ -414,25 +421,11 @@ def _first_present(mapping, keys):
     return None
 
 
-def _validate_simulation_model(simulation_model):
-    if defaults.is_supported_circuit(simulation_model):
-        return
-    model_key = str(simulation_model).strip().lower().replace(" ", "")
-    supported = {
-        "gillespy",
-        "gillespy_tau_hybrid",
-        "tau-hybrid",
-        "tauhybrid",
-        "stochastic",
-        "sde",
-        "sde+noise",
-        "sde+noise+heterogeneity",
-    }
-    if model_key in supported:
-        return
-    if model_key in {"ode", "ode+noise"}:
-        raise NotImplementedError(
-            "Recipe support is wired in, but the ODE simulation backend is not connected "
-            "to the standard training-data writer yet."
+def _resolve_solver_for_circuit(solver, circuit):
+    solver = solver or defaults.default_solver_for_circuit(circuit)
+    if defaults.is_supported_circuit(solver):
+        raise ValueError(
+            f"{solver!r} is a circuit/model name. Put it in the recipe `circuit` field "
+            "and use `solver` for the simulation backend."
         )
-    raise NotImplementedError(f"Simulation model {simulation_model!r} is not implemented yet.")
+    return defaults.validate_solver_for_circuit(solver, circuit)

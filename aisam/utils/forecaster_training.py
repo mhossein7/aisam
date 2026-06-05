@@ -43,7 +43,7 @@ def train_forecaster(
     model_config = _resolve_model_config(config or {"type": "regressor"})
     if model_config is None:
         raise ValueError("A model config is required for forecaster training.")
-    model_type = str(model_config["type"]).lower()
+    model_type = _normalize_model_type(model_config["type"])
     if not _is_supported_model_type(model_type):
         raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
 
@@ -245,6 +245,259 @@ def train_forecaster(
     }
 
 
+def cross_test_forecaster(
+    model=None,
+    training_data=None,
+    test_data=None,
+    trained_model=None,
+    output_root=None,
+    visualization=None,
+    random_state=None,
+    include_main_periodic="eval",
+    label=None,
+):
+    """
+    Train or load a forecaster and evaluate it on training holdout plus test data.
+
+    Use either:
+    - model + training_data + test_data
+    - trained_model + test_data
+
+    `model` may be a model type string or model config JSON path. `training_data`
+    and `test_data` may be run folders, parquet files, pickle files, or lists of
+    those inputs.
+    """
+    from aisam.comptools.regression_forecaster import make_window_dataset, split_sequences_by_cell
+
+    if test_data is None:
+        raise ValueError("Provide --test-data for cross-testing.")
+    if trained_model is None and (model is None or training_data is None):
+        raise ValueError("Provide --model and --training-data, or provide --trained-model.")
+    if trained_model is not None and model is not None:
+        raise ValueError("Use either --trained-model or --model, not both.")
+
+    test_paths = _resolve_main_simulation_paths(test_data)
+    saved_model_config = {}
+    training_paths = None
+    source_model_path = None
+
+    if trained_model is not None:
+        source_model_path = Path(trained_model)
+        if not source_model_path.exists():
+            raise FileNotFoundError(f"Trained model not found: {source_model_path}")
+        with open(source_model_path, "rb") as f:
+            forecaster = dill.load(f)
+        saved_model_config = _load_saved_model_config(source_model_path)
+        model_config = _model_config_from_saved_model_config(saved_model_config, forecaster)
+        hyperparams = _forecaster_hyperparams_from_model_config(model_config)
+        _fill_hyperparams_from_forecaster(hyperparams, forecaster)
+        if random_state is not None:
+            hyperparams["random_state"] = random_state
+        include_main_periodic = _normalize_policy(
+            saved_model_config.get("policies", {}).get("include_main_periodic", include_main_periodic)
+        )
+        training_paths = _training_paths_from_saved_model_config(saved_model_config)
+    else:
+        model_config = _resolve_model_config(model)
+        if model_config is None:
+            raise ValueError("A model config is required for cross-testing.")
+        model_type = _normalize_model_type(model_config["type"])
+        if not _is_supported_model_type(model_type):
+            raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
+        if visualization is None:
+            visualization = True
+        training_paths = _resolve_main_simulation_paths(training_data)
+        include_main_periodic = _normalize_policy(include_main_periodic)
+        hyperparams = _forecaster_hyperparams_from_model_config(model_config)
+        hyperparams.setdefault("past_feature_window", 20)
+        hyperparams.setdefault("future_window", 1)
+        hyperparams.setdefault("output_species", "F")
+        if random_state is not None:
+            hyperparams.setdefault("random_state", random_state)
+        validation_fraction = float(hyperparams.get("validation_fraction", 0.2))
+        if validation_fraction <= 0 or validation_fraction >= 1:
+            raise ValueError("validation_fraction must be in the range (0, 1).")
+
+        train_sequences, training_holdout_sequences, training_configs = _training_split_from_paths(
+            training_paths,
+            model_config=model_config,
+            hyperparams=hyperparams,
+            include_main_periodic=include_main_periodic,
+        )
+        if not train_sequences:
+            raise ValueError("No training sequences were selected. Check training data and policies.")
+        if not training_holdout_sequences:
+            raise ValueError("No held-out training sequences were selected.")
+        window_args = _window_args_from_hyperparams(hyperparams)
+        X_train, y_train, train_meta = make_window_dataset(train_sequences, **window_args)
+        forecaster = _build_forecaster(
+            model_type,
+            model_config,
+            hyperparams,
+            window_args,
+            train_sequences,
+        )
+        forecaster.fit(X_train, y_train)
+        first_config = next((cfg for cfg in training_configs if cfg), {})
+        _assign_saved_sampling_metadata(forecaster, first_config)
+        training_fit_metrics = forecaster.evaluate(X_train, y_train)
+
+    if visualization is None:
+        visualization = True
+
+    if "training_fit_metrics" not in locals():
+        training_fit_metrics = None
+    training_holdout_dataset = None
+    training_holdout_metrics = None
+    if training_paths is not None:
+        train_sequences, training_holdout_sequences, _ = _training_split_from_paths(
+            training_paths,
+            model_config=model_config,
+            hyperparams=hyperparams,
+            include_main_periodic=include_main_periodic,
+        )
+        if training_holdout_sequences:
+            training_holdout_dataset, training_holdout_metrics = _evaluate_sequences(
+                forecaster=forecaster,
+                sequences=training_holdout_sequences,
+                hyperparams=hyperparams,
+            )
+    elif saved_model_config:
+        saved_metrics = saved_model_config.get("metrics", {})
+        training_holdout_metrics = saved_metrics.get("evaluation", saved_metrics.get("validation"))
+
+    test_sequences, test_configs = _all_sequences_from_paths(
+        test_paths,
+        model_config=model_config,
+        run_label="test",
+    )
+    if not test_sequences:
+        raise ValueError("No test sequences were found.")
+    test_dataset, test_metrics = _evaluate_sequences(
+        forecaster=forecaster,
+        sequences=test_sequences,
+        hyperparams=hyperparams,
+    )
+
+    run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    model_label = label or _plain_model_label(model_config, source_model_path)
+    output_dir = _cross_testing_output_dir(
+        output_root=output_root,
+        training_paths=training_paths,
+        source_model_path=source_model_path,
+        model_label=model_label,
+        run_stamp=run_stamp,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    model_path = source_model_path
+    if trained_model is None:
+        model_path = output_dir / "model.pkl"
+        with open(model_path, "wb") as f:
+            dill.dump(forecaster, f)
+
+    figures = {}
+    if visualization:
+        if training_holdout_dataset is not None:
+            training_artifacts = _save_evaluation_artifacts(
+                forecaster=forecaster,
+                dataset=training_holdout_dataset,
+                output_dir=output_dir / "figures" / "training_holdout",
+                output_species=hyperparams.get("output_species", "F"),
+                random_state=hyperparams.get("random_state"),
+                title="training holdout",
+            )
+            figures["training_holdout"] = training_artifacts.get("figures", {})
+        test_artifacts = _save_evaluation_artifacts(
+            forecaster=forecaster,
+            dataset=test_dataset,
+            output_dir=output_dir / "figures" / "test",
+            output_species=hyperparams.get("output_species", "F"),
+            random_state=hyperparams.get("random_state"),
+            title="test",
+        )
+        figures["test"] = test_artifacts.get("figures", {})
+
+    training_performance_path = None
+    if training_holdout_metrics is not None:
+        training_performance_path = _save_performance_info(
+            output_dir / "training_holdout_performance.json",
+            metrics={"evaluation": training_holdout_metrics},
+            dataset=training_holdout_dataset,
+            label="training_holdout",
+        )
+    test_performance_path = _save_performance_info(
+        output_dir / "test_performance.json",
+        metrics={"evaluation": test_metrics},
+        dataset=test_dataset,
+        label="test",
+    )
+
+    metrics = {
+        "train": training_fit_metrics,
+        "training_holdout": training_holdout_metrics,
+        "test": test_metrics,
+    }
+    performance_path = output_dir / "performance.json"
+    performance_dump = {
+        "label": "cross_testing",
+        "metrics": _json_safe(metrics),
+        "performance_files": {
+            "training_holdout": str(training_performance_path) if training_performance_path else None,
+            "test": str(test_performance_path),
+        },
+    }
+    with open(performance_path, "w") as f:
+        json.dump(performance_dump, f, indent=2)
+
+    config_dump = {
+        "created_at": run_stamp,
+        "mode": "cross_testing",
+        "model_type": _normalize_model_type(model_config.get("type", "regressor")),
+        "model_file": str(model_path),
+        "trained_model_input": str(source_model_path) if source_model_path else None,
+        "model_hyperparameters": _json_safe(hyperparams),
+        "policies": {
+            "include_main_periodic": include_main_periodic,
+        },
+        "data": {
+            "training_simulation_files": [str(path) for path in training_paths] if training_paths else [],
+            "test_simulation_files": [str(path) for path in test_paths],
+            "test_simulation_configs": _json_safe(test_configs),
+            "training_holdout_sequences": len(training_holdout_dataset.get("validation_sequences", []))
+            if training_holdout_dataset is not None
+            else 0,
+            "test_sequences": len(test_sequences),
+            "training_holdout_windows": int(training_holdout_dataset["X_validation"].shape[0])
+            if training_holdout_dataset is not None
+            else 0,
+            "test_windows": int(test_dataset["X_validation"].shape[0]),
+        },
+        "metrics": _json_safe(metrics),
+        "performance_file": str(performance_path),
+        "training_holdout_performance_file": str(training_performance_path)
+        if training_performance_path
+        else None,
+        "test_performance_file": str(test_performance_path),
+        "visualization_files": _json_safe(figures),
+    }
+    config_path = output_dir / "config.json"
+    with open(config_path, "w") as f:
+        json.dump(config_dump, f, indent=2)
+
+    return {
+        "output_dir": output_dir,
+        "model_path": model_path,
+        "config_path": config_path,
+        "performance_path": performance_path,
+        "training_holdout_performance_path": training_performance_path,
+        "test_performance_path": test_performance_path,
+        "metrics": metrics,
+        "figures": figures,
+        "config": config_dump,
+    }
+
+
 def train_forecaster_from_simulation(
     simulation_paths,
     model=None,
@@ -319,7 +572,7 @@ def train_forecaster_random_stim_eval(
     standard simulation before forecaster training.
     """
     model_config = _resolve_model_config(model or {"type": "regressor"})
-    model_type = str(model_config["type"]).lower()
+    model_type = _normalize_model_type(model_config["type"])
     if not _is_supported_model_type(model_type):
         raise NotImplementedError(f"Model type {model_config['type']!r} is not implemented yet.")
 
@@ -371,7 +624,7 @@ def _resolve_model_config(model):
 
 
 def _train_and_save_model(model_config, cells, data_config, run_stamp):
-    model_type = str(model_config["type"]).lower()
+    model_type = _normalize_model_type(model_config["type"])
     if _is_supported_model_type(model_type):
         data_path = _simulation_data_path_from_config(data_config)
         if data_path is not None:
@@ -405,7 +658,7 @@ def _train_and_save_regressor(model_config, cells, data_config, run_stamp):
             Path(data_config["simulation_file"]).parent / "models",
         )
     )
-    model_type = str(model_config["type"]).lower()
+    model_type = _normalize_model_type(model_config["type"])
     model_dir = model_root / f"{model_type}_{run_stamp}"
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -432,7 +685,7 @@ def _train_and_save_regressor(model_config, cells, data_config, run_stamp):
 
     model_config_dump = {
         "created_at": run_stamp,
-        "model_type": str(model_config["type"]).lower(),
+        "model_type": _normalize_model_type(model_config["type"]),
         "model_file": str(model_path),
         "model_hyperparameters": _json_safe(hyperparams),
         "metrics": _json_safe(metrics),
@@ -496,7 +749,7 @@ def _forecaster_hyperparams_from_model_config(model_config):
 
 
 def _is_supported_model_type(model_type):
-    return str(model_type).lower() in {
+    return _normalize_model_type(model_type) in {
         "regressor",
         "regression",
         "regression_forecaster",
@@ -507,11 +760,15 @@ def _is_supported_model_type(model_type):
 
 
 def _is_lstm_model_type(model_type):
-    return str(model_type).lower() in {
+    return _normalize_model_type(model_type) in {
         "lstm",
         "lstm_encoder_decoder",
         "lstm_encoder_decoder_forecaster",
     }
+
+
+def _normalize_model_type(model_type):
+    return str(model_type).strip().lower().replace("-", "_").replace(" ", "_")
 
 
 def _train_model_from_cells(cells, model_config, hyperparams):
@@ -536,7 +793,7 @@ def _train_model_from_cells(cells, model_config, hyperparams):
     window_args = _window_args_from_hyperparams(hyperparams)
     X_train, y_train, train_meta = make_window_dataset(train_sequences, **window_args)
     forecaster = _build_forecaster(
-        str(model_config["type"]).lower(),
+        _normalize_model_type(model_config["type"]),
         model_config,
         hyperparams,
         window_args,
@@ -724,6 +981,61 @@ def _load_run_config_from_simulation_path(path):
         return json.load(f)
 
 
+def _load_saved_model_config(model_path):
+    config_path = Path(model_path).parent / "config.json"
+    if not config_path.exists():
+        return {}
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+
+def _model_config_from_saved_model_config(saved_config, forecaster):
+    model_type = saved_config.get("model_type") or _infer_model_type_from_forecaster(forecaster)
+    hyperparams = dict(saved_config.get("model_hyperparameters", {}))
+    return {
+        "type": model_type,
+        "hyperparameters": hyperparams,
+        "visualization": bool(saved_config.get("visualization", False)),
+    }
+
+
+def _infer_model_type_from_forecaster(forecaster):
+    name = type(forecaster).__name__.lower()
+    if "lstm" in name:
+        return "lstm_encoder_decoder"
+    if "transformer" in name:
+        return "transformer"
+    return "regressor"
+
+
+def _fill_hyperparams_from_forecaster(hyperparams, forecaster):
+    for key in (
+        "past_feature_window",
+        "future_window",
+        "past_input_window",
+        "future_input_window",
+        "sampling",
+        "sample_interval_minutes",
+    ):
+        value = getattr(forecaster, key, None)
+        if value is not None:
+            hyperparams.setdefault(key, value)
+    hyperparams.setdefault("past_feature_window", 20)
+    hyperparams.setdefault("future_window", 1)
+    hyperparams.setdefault("output_species", "F")
+    return hyperparams
+
+
+def _training_paths_from_saved_model_config(saved_config):
+    data = saved_config.get("data", {})
+    paths = data.get("training_simulation_files") or data.get("main_simulation_files") or []
+    if not paths and data.get("simulation_file"):
+        paths = [data["simulation_file"]]
+    if not paths:
+        return None
+    return _resolve_main_simulation_paths(paths)
+
+
 def _sampling_from_run_config(config):
     simulated_cells = config.get("simulated_cells", {})
     if "sampling" in simulated_cells:
@@ -759,6 +1071,38 @@ def _sequences_by_stim_group_from_paths(paths, model_config, run_label="run"):
         repetitive_sequences.extend(_prefix_sequence_cell_ids(run_repetitive, f"{run_label}{run_index + 1}"))
 
     return random_sequences, repetitive_sequences, run_configs
+
+
+def _all_sequences_from_paths(paths, model_config, run_label="run"):
+    sequences = []
+    run_configs = []
+    for run_index, path in enumerate(paths):
+        run_config = _load_run_config_from_simulation_path(path)
+        run_configs.append(run_config)
+        run_sequences = _sequences_from_simulation_path(path, model_config)
+        sequences.extend(_prefix_sequence_cell_ids(run_sequences, f"{run_label}{run_index + 1}"))
+    return sequences, run_configs
+
+
+def _training_split_from_paths(paths, model_config, hyperparams, include_main_periodic="eval"):
+    from aisam.comptools.regression_forecaster import split_sequences_by_cell
+
+    include_main_periodic = _normalize_policy(include_main_periodic)
+    main_random, main_repetitive, main_configs = _sequences_by_stim_group_from_paths(
+        paths,
+        model_config=model_config,
+        run_label="training",
+    )
+    train_sequences, heldout_sequences = split_sequences_by_cell(
+        main_random,
+        validation_fraction=float(hyperparams.get("validation_fraction", 0.2)),
+        random_state=hyperparams.get("random_state"),
+    )
+    if include_main_periodic == "train":
+        train_sequences.extend(main_repetitive)
+    elif include_main_periodic == "eval":
+        heldout_sequences.extend(main_repetitive)
+    return train_sequences, heldout_sequences, main_configs
 
 
 def _sequences_from_simulation_path(path, model_config):
@@ -967,9 +1311,10 @@ def _save_evaluation_artifacts(
     error_info = _window_error_info(dataset["y_validation"], dataset["validation_predictions"])
     histogram_path = plot_error_distribution(
         error_info["per_window_rmse"],
-        output_dir / "error_distribution.svg",
-        title=f"{title} error distribution",
+        output_dir / "rmse_histogram.svg",
+        title=f"{title} RMSE histogram",
     )
+    figures["rmse_histogram"] = histogram_path
     figures["error_distribution"] = histogram_path
     return {"figures": figures, "error_info": error_info}
 
@@ -1043,8 +1388,41 @@ def _policy_enabled(value):
     return _normalize_policy(value) != "none"
 
 
+def _plain_model_label(model_config, source_model_path=None):
+    if source_model_path is not None:
+        parent = Path(source_model_path).parent
+        if parent.name and parent.name != "models":
+            return _safe_label(parent.name)
+    return _safe_label(_normalize_model_type(model_config.get("type", "regressor")))
+
+
+def _cross_testing_output_dir(output_root, training_paths, source_model_path, model_label, run_stamp):
+    if output_root is not None:
+        return Path(output_root) / _safe_label(model_label) / "cross_testing" / run_stamp
+    if source_model_path is not None:
+        return Path(source_model_path).parent / "cross_testing" / run_stamp
+    if training_paths:
+        training_root = Path(training_paths[0]).parent
+        return training_root / "models" / _safe_label(model_label) / "cross_testing" / run_stamp
+    return Path.cwd() / "models" / _safe_label(model_label) / "cross_testing" / run_stamp
+
+
+def _safe_label(value):
+    label = str(value).strip().lower()
+    chars = []
+    for ch in label:
+        if ch.isalnum():
+            chars.append(ch)
+        elif ch in {"_", "-"}:
+            chars.append("_")
+        else:
+            chars.append("_")
+    label = "".join(chars).strip("_")
+    return label or "model"
+
+
 def _model_label(model_config, include_noisy, include_main_periodic):
-    model_type = str(model_config.get("type", "regressor")).lower()
+    model_type = _normalize_model_type(model_config.get("type", "regressor"))
     parts = []
     if include_main_periodic == "train":
         parts.append("periodic")
