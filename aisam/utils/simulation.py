@@ -20,13 +20,16 @@ def run_sanity_check_simulation(config, species=None, num_realizations=None, pro
     from aisam.utils.visualization_tools import plot_sanity_simulation_group
 
     config, source_root, _ = _load_simulation_config_from_root(config)
-    params = _load_params_from_config(config, source_root=source_root)
     label = _resolve_simulation_circuit(config)
     config["circuit"] = label
     config["label"] = label
     config["solver"] = _resolve_simulation_solver(config, label)
     config.pop("sovler", None)
     config.pop("simulation_model", None)
+    params = defaults.clean_circuit_params(
+        label,
+        _load_params_from_config(config, source_root=source_root),
+    )
     t_max = int(config.get("t_max", params.get("t_max")))
     sampling = int(config.get("sampling", params.get("sampling", 10)))
     sample_interval = _sample_interval_from_config(config)
@@ -170,7 +173,10 @@ def run_training_simulation(
         default=350,
     )
 
-    params = _load_params_from_config(config, source_root=source_root)
+    params = defaults.clean_circuit_params(
+        label,
+        _load_params_from_config(config, source_root=source_root),
+    )
     if config.get("t_max", params.get("t_max")) is None:
         raise ValueError("Provide t_max in the config or parameter dictionary.")
 

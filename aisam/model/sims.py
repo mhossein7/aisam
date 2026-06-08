@@ -44,12 +44,12 @@ class Cell_sim():
     
     def assign_parameters(self,params):
         if isinstance(params,dict):
-            self.circuit_params = params
+            self.circuit_params = defaults.clean_circuit_params(self.circuit, params)
         elif isinstance(params,str):
             if os.path.isfile(params) and params.lower().endswith(".json"):
                 try:
                     with open(params, "r") as f:
-                        self.circuit_params = json.load(f)
+                        self.circuit_params = defaults.clean_circuit_params(self.circuit, json.load(f))
                 except json.JSONDecodeError as e:
                     raise ValueError(f"Error decoding JSON file '{params}': {e}")
             else:

@@ -7,44 +7,7 @@ from aisam.model import defaults
 
 CIRCUIT_PARAMETER_SCHEMAS = {
     "simple": ["delta"],
-    "ccasr": ["alpha", "k", "n", "tau_delay", "h1", "h2", "c2", "delta"],
-    "ccasr_noe": ["alpha", "k", "n", "tau_delay", "c2", "delta"],
-    "ccasr_ode": ["alpha", "k", "n", "tau_delay", "c2", "delta"],
-    "inverter": [
-        "alpha",
-        "beta",
-        "k_tet",
-        "k",
-        "n",
-        "n_tet",
-        "tau_delay",
-        "h1",
-        "h2",
-        "c2",
-        "delta",
-    ],
-    "inverter_noe": [
-        "alpha",
-        "beta",
-        "k_tet",
-        "k",
-        "n",
-        "n_tet",
-        "tau_delay",
-        "c2",
-        "delta",
-    ],
-    "ode_inverter": [
-        "alpha",
-        "beta",
-        "k_tet",
-        "k",
-        "n",
-        "n_tet",
-        "tau_delay",
-        "c2",
-        "delta",
-    ],
+    **defaults.CIRCUIT_PARAMETER_SCHEMAS,
 }
 
 def repetitive_stim_maker(num_repeat,total_time,off_first = False):
@@ -143,14 +106,21 @@ def config_generator(
             f"{sorted(CIRCUIT_PARAMETER_SCHEMAS.keys())}"
         )
 
-    circuit_params = dict(params or {})
-    for key in required_params:
-        if key in kwargs:
+    if defaults.is_supported_circuit(circuit_key):
+        circuit_params = defaults.default_circuit_params(circuit_key)
+        allowed_params = set(defaults.parameter_schema_for_circuit(circuit_key))
+        known_circuit_params = defaults.all_circuit_parameter_names()
+    else:
+        circuit_params = {}
+        allowed_params = set(required_params) | {"t_max", "sampling"}
+        known_circuit_params = set().union(*CIRCUIT_PARAMETER_SCHEMAS.values()) | {"t_max", "sampling"}
+
+    circuit_params.update(dict(params or {}))
+    for key in list(kwargs):
+        if key in allowed_params:
             circuit_params[key] = kwargs.pop(key)
-    if circuit_key in {"ccasr_ode", "ode_inverter"}:
-        for key in ("x0", "measurement_noise", "std"):
-            if key in kwargs:
-                circuit_params[key] = kwargs.pop(key)
+        elif key in known_circuit_params:
+            kwargs.pop(key)
 
     missing = [key for key in required_params if key not in circuit_params]
     if missing:
@@ -163,6 +133,8 @@ def config_generator(
 
     circuit_params["t_max"] = t_max
     circuit_params["sampling"] = sampling
+    if defaults.is_supported_circuit(circuit_key):
+        circuit_params = defaults.clean_circuit_params(circuit_key, circuit_params)
 
     params_path = None
     if save_params_file:

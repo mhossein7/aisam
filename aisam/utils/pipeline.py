@@ -207,7 +207,8 @@ def load_experiment_recipe(root_folder=None):
             solver_choice = None
         else:
             solver_choice = legacy_simulation_model
-    circuit = config.get("circuit", config.get("label", recipe.get("circuit")))
+    raw_circuit = config.get("circuit", config.get("label", recipe.get("circuit")))
+    circuit = raw_circuit
     if defaults.is_supported_circuit(legacy_simulation_model):
         circuit = legacy_simulation_model
     if circuit is None:
@@ -217,7 +218,9 @@ def load_experiment_recipe(root_folder=None):
     if config.get("label") is None or defaults.is_supported_circuit(config.get("label")):
         config["label"] = circuit
 
-    params = defaults.default_circuit_params(circuit)
+    params = defaults.default_circuit_params(raw_circuit or circuit)
+    if defaults.is_measurement_noise_variant(raw_circuit):
+        params["measurement_noise"] = True
     params.update(_recipe_params(recipe))
     file_params = file_config.get("params", file_config.get("circuit_parameters"))
     if isinstance(file_params, dict):
@@ -234,6 +237,7 @@ def load_experiment_recipe(root_folder=None):
         params.update(aux.load_params(params_path))
         config["params_path"] = str(params_path)
 
+    params = defaults.clean_circuit_params(circuit, params)
     config["params"] = params
     config["circuit_parameters"] = params
     config.setdefault("t_max", params.get("t_max", 960))
