@@ -30,7 +30,7 @@ class Cell_sim():
             "ccasr_noe": models.CcaSR_noE,
             "inverter_noe": models.CcaSR_Inverter_noE,
             "ccasr_ode": models.ODE_CcaSR,
-            "inverter_ode": models.ODE_CcaSR_Inverter,
+            "ode_inverter": models.ODE_CcaSR_Inverter,
         }
         if self.circuit not in model_factories:
             raise ValueError(
