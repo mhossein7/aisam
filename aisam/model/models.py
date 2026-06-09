@@ -388,10 +388,11 @@ class ODE_CcaSR():
     def rxn(self,x,t,U):
         H,F = x
         H_eff = _nonnegative(H)
+        F_eff = _nonnegative(F)
         ind_t = min(max(0,int(np.floor((t-self.tau_delay)/5))), len(U)-1)
         H_signal = (self.c2 * H_eff) ** self.n
-        dHdt = U[ind_t] - self.c2 * H
-        dFdt = self.alpha * H_signal / (self.k + H_signal) - self.delta * F
+        dHdt = U[ind_t] - self.c2 * H_eff
+        dFdt = self.alpha * H_signal / (self.k + H_signal) - self.delta * F_eff
         return [dHdt,dFdt] 
         
     def solve(self,stim,x0):
