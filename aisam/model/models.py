@@ -461,12 +461,13 @@ class ODE_CcaSR_Inverter():
         H,T,F = x
         H_eff = _nonnegative(H)
         T_eff = _nonnegative(T)
+        F_eff = _nonnegative(F)
         ind_t = min(max(0,int(np.floor((t-self.tau_delay)/5))), len(U)-1)
         H_signal = (self.c2 * H_eff) ** self.n
         T_signal = (T_eff / self.k_tet) ** self.n_tet
-        dHdt = U[ind_t] - self.c2 * H
-        dTdt = self.alpha * H_signal / (self.k + H_signal) - self.delta * T
-        dFdt = self.beta / (1 + T_signal) - self.delta * F
+        dHdt = U[ind_t] - self.c2 * H_eff
+        dTdt = self.alpha * H_signal / (self.k + H_signal) - self.delta * T_eff
+        dFdt = self.beta / (1 + T_signal) - self.delta * F_eff
         return [dHdt,dTdt,dFdt] 
         
     def solve(self,stim,x0):
