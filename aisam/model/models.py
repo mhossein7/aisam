@@ -13,6 +13,18 @@ def add_multiplicative_noise(arrays, mean=1.0, sd=0.05, seed=None):
     ]
 
 
+def _nonnegative(value):
+    return np.maximum(value, 0.0)
+
+
+def _clean_ode_trace(values):
+    values = np.asarray(values, dtype=float)
+    finite = np.isfinite(values)
+    cleaned = np.clip(values, 0.0, None)
+    cleaned[~finite] = np.nan
+    return cleaned
+
+
 class Simple(gillespy2.Model):
     def __init__(self,params,t_max,stim_vec):
         super().__init__(name='Simple_rxn')
@@ -375,9 +387,11 @@ class ODE_CcaSR():
 
     def rxn(self,x,t,U):
         H,F = x
+        H_eff = _nonnegative(H)
         ind_t = min(max(0,int(np.floor((t-self.tau_delay)/5))), len(U)-1)
+        H_signal = (self.c2 * H_eff) ** self.n
         dHdt = U[ind_t] - self.c2 * H
-        dFdt = self.alpha * (self.c2*H)**self.n/(self.k + (self.c2*H)**self.n) - self.delta * F
+        dFdt = self.alpha * H_signal / (self.k + H_signal) - self.delta * F
         return [dHdt,dFdt] 
         
     def solve(self,stim,x0):
@@ -386,13 +400,14 @@ class ODE_CcaSR():
         
         run_results = {}
         for index , species in enumerate(self.species):
-            run_results[species] = np.asarray(x[:,index])
+            run_results[species] = _clean_ode_trace(x[:,index])
 
         if self.measurement_noise:
             run_results[self.reporter_species] = add_multiplicative_noise(
                 [run_results[self.reporter_species]],
                 sd=self.std,
             )[0]
+            run_results[self.reporter_species] = _clean_ode_trace(run_results[self.reporter_species])
             
         self.results = run_results
         return run_results
@@ -444,10 +459,14 @@ class ODE_CcaSR_Inverter():
     
     def rxn(self,x,t,U):
         H,T,F = x
+        H_eff = _nonnegative(H)
+        T_eff = _nonnegative(T)
         ind_t = min(max(0,int(np.floor((t-self.tau_delay)/5))), len(U)-1)
+        H_signal = (self.c2 * H_eff) ** self.n
+        T_signal = (T_eff / self.k_tet) ** self.n_tet
         dHdt = U[ind_t] - self.c2 * H
-        dTdt = self.alpha * (self.c2*H)**self.n/(self.k + (self.c2*H)**self.n) - self.delta * T
-        dFdt = self.beta/(1+(T/self.k_tet)**self.n_tet) - self.delta * F
+        dTdt = self.alpha * H_signal / (self.k + H_signal) - self.delta * T
+        dFdt = self.beta / (1 + T_signal) - self.delta * F
         return [dHdt,dTdt,dFdt] 
         
     def solve(self,stim,x0):
@@ -456,13 +475,14 @@ class ODE_CcaSR_Inverter():
         
         run_results = {}
         for index , species in enumerate(self.species):
-            run_results[species] = np.asarray(x[:,index])
+            run_results[species] = _clean_ode_trace(x[:,index])
 
         if self.measurement_noise:
             run_results[self.reporter_species] = add_multiplicative_noise(
                 [run_results[self.reporter_species]],
                 sd=self.std,
             )[0]
+            run_results[self.reporter_species] = _clean_ode_trace(run_results[self.reporter_species])
             
         self.results = run_results
         return run_results

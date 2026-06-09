@@ -153,14 +153,20 @@ def plot_forecaster_evaluation_examples(
 
     y_true = np.asarray(dataset["y_validation"], dtype=float)
     y_pred = np.asarray(dataset["validation_predictions"], dtype=float)
-    per_window_rmse = np.sqrt(np.mean((y_true - y_pred) ** 2, axis=1))
+    finite_mask = np.isfinite(y_true).all(axis=1) & np.isfinite(y_pred).all(axis=1)
+    if not finite_mask.any():
+        return {}
+    finite_indices = np.flatnonzero(finite_mask)
+    finite_rmse = np.sqrt(np.mean((y_true[finite_mask] - y_pred[finite_mask]) ** 2, axis=1))
 
     rng = np.random.default_rng(random_state)
     indices = {
-        "random": int(rng.integers(len(per_window_rmse))),
-        "best": int(np.argmin(per_window_rmse)),
-        "worst": int(np.argmax(per_window_rmse)),
+        "random": int(finite_indices[int(rng.integers(len(finite_indices)))]),
+        "best": int(finite_indices[int(np.argmin(finite_rmse))]),
+        "worst": int(finite_indices[int(np.argmax(finite_rmse))]),
     }
+    per_window_rmse = np.full(y_true.shape[0], np.nan, dtype=float)
+    per_window_rmse[finite_mask] = finite_rmse
 
     paths = {}
     for name, index in indices.items():
@@ -189,6 +195,9 @@ def plot_error_distribution(errors, save_path, title="Error distribution"):
     from pathlib import Path
 
     errors = np.asarray(errors, dtype=float).reshape(-1)
+    errors = errors[np.isfinite(errors)]
+    if len(errors) == 0:
+        errors = np.asarray([0.0], dtype=float)
     log_errors = np.log10(np.clip(errors, np.finfo(float).tiny, None))
     save_path = Path(save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)

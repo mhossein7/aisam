@@ -178,6 +178,8 @@ def cells_to_sequences(
                 features = np.column_stack(feature_cols).astype(float)
                 output = output_runs[realization_index].astype(float)
                 inputs = stim_to_input_trace(cell.stims[run_index], len(output), input_dim=input_dim)
+                if not _is_finite_sequence(features, inputs, output):
+                    continue
 
                 sequences.append(
                     {
@@ -238,9 +240,13 @@ def dataframe_to_sequences(
                 )
             feature_cols.append(species_group[value_column].to_numpy(dtype=float))
 
+        features = np.column_stack(feature_cols).astype(float)
+        if not _is_finite_sequence(features, stim, output):
+            continue
+
         sequences.append(
             {
-                "features": np.column_stack(feature_cols).astype(float),
+                "features": features,
                 "inputs": stim,
                 "output": output,
                 "cell_id": cell_id,
@@ -301,7 +307,17 @@ def make_window_dataset(
     if not X_rows:
         raise ValueError("No training windows were generated. Check window sizes and trace length.")
 
-    return np.vstack(X_rows), np.vstack(y_rows), meta
+    X = np.vstack(X_rows)
+    y = np.vstack(y_rows)
+    finite_mask = np.isfinite(X).all(axis=1) & np.isfinite(y).all(axis=1)
+    if not finite_mask.any():
+        raise ValueError("No finite training windows were generated. Check simulation data for NaN/inf values.")
+    if not finite_mask.all():
+        X = X[finite_mask]
+        y = y[finite_mask]
+        meta = [item for item, keep in zip(meta, finite_mask) if keep]
+
+    return X, y, meta
 
 
 def sample_sequences_at_interval(sequences, sampling, sample_interval_minutes=None):
@@ -470,19 +486,53 @@ def evaluate_regression_forecaster(
 
 
 def regression_metrics(y_true, y_pred):
-    """Return common multi-output regression metrics."""
+    """Return multi-output metrics averaged over per-prediction windows."""
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
+    if y_true.ndim == 1:
+        y_true = y_true.reshape(-1, 1)
+    if y_pred.ndim == 1:
+        y_pred = y_pred.reshape(-1, 1)
+
+    finite_mask = np.isfinite(y_true).all(axis=1) & np.isfinite(y_pred).all(axis=1)
+    total_windows = int(y_true.shape[0])
+    finite_windows = int(np.sum(finite_mask))
+    invalid_windows = total_windows - finite_windows
+    if finite_windows == 0:
+        return {
+            "mse": np.nan,
+            "rmse": np.nan,
+            "mae": np.nan,
+            "r2": np.nan,
+            "num_windows": total_windows,
+            "finite_windows": 0,
+            "invalid_windows": invalid_windows,
+        }
+
+    y_true = y_true[finite_mask]
+    y_pred = y_pred[finite_mask]
     residual = y_true - y_pred
 
-    mse = float(np.mean(residual ** 2))
-    rmse = float(np.sqrt(mse))
-    mae = float(np.mean(np.abs(residual)))
+    per_window_mse = np.mean(residual ** 2, axis=1)
+    per_window_rmse = np.sqrt(per_window_mse)
+    per_window_mae = np.mean(np.abs(residual), axis=1)
+
+    mse = float(np.mean(per_window_mse))
+    rmse = float(np.mean(per_window_rmse))
+    mae = float(np.mean(per_window_mae))
 
     denom = np.sum((y_true - np.mean(y_true, axis=0)) ** 2)
     r2 = np.nan if denom == 0 else float(1 - np.sum(residual ** 2) / denom)
 
-    return {"mse": mse, "rmse": rmse, "mae": mae, "r2": r2}
+    return {
+        "mse": mse,
+        "rmse": rmse,
+        "mae": mae,
+        "r2": r2,
+        "num_windows": total_windows,
+        "finite_windows": finite_windows,
+        "invalid_windows": invalid_windows,
+    }
 
 
 def split_sequences_by_cell(sequences, validation_fraction=0.2, random_state=None):
@@ -578,6 +628,14 @@ def _normalize_species_list(feature_species, species_names):
     if isinstance(feature_species, str):
         return [feature_species]
     return list(feature_species)
+
+
+def _is_finite_sequence(features, inputs, output):
+    return (
+        np.isfinite(features).all()
+        and np.isfinite(inputs).all()
+        and np.isfinite(output).all()
+    )
 
 
 def _realization_index(realization):

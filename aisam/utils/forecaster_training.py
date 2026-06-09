@@ -254,6 +254,7 @@ def cross_test_forecaster(
     visualization=None,
     random_state=None,
     include_main_periodic="eval",
+    include_test_periodic="eval",
     label=None,
 ):
     """
@@ -296,6 +297,9 @@ def cross_test_forecaster(
         include_main_periodic = _normalize_policy(
             saved_model_config.get("policies", {}).get("include_main_periodic", include_main_periodic)
         )
+        include_test_periodic = _normalize_policy(
+            saved_model_config.get("policies", {}).get("include_test_periodic", include_test_periodic)
+        )
         training_paths = _training_paths_from_saved_model_config(saved_model_config)
     else:
         model_config = _resolve_model_config(model)
@@ -308,6 +312,7 @@ def cross_test_forecaster(
             visualization = True
         training_paths = _resolve_main_simulation_paths(training_data)
         include_main_periodic = _normalize_policy(include_main_periodic)
+        include_test_periodic = _normalize_policy(include_test_periodic)
         hyperparams = _forecaster_hyperparams_from_model_config(model_config)
         hyperparams.setdefault("past_feature_window", 20)
         hyperparams.setdefault("future_window", 1)
@@ -366,9 +371,10 @@ def cross_test_forecaster(
         saved_metrics = saved_model_config.get("metrics", {})
         training_holdout_metrics = saved_metrics.get("evaluation", saved_metrics.get("validation"))
 
-    test_sequences, test_configs = _all_sequences_from_paths(
+    test_sequences, test_configs = _test_sequences_from_paths(
         test_paths,
         model_config=model_config,
+        include_periodic=include_test_periodic,
         run_label="test",
     )
     if not test_sequences:
@@ -459,6 +465,7 @@ def cross_test_forecaster(
         "model_hyperparameters": _json_safe(hyperparams),
         "policies": {
             "include_main_periodic": include_main_periodic,
+            "include_test_periodic": include_test_periodic,
         },
         "data": {
             "training_simulation_files": [str(path) for path in training_paths] if training_paths else [],
@@ -1084,6 +1091,18 @@ def _all_sequences_from_paths(paths, model_config, run_label="run"):
     return sequences, run_configs
 
 
+def _test_sequences_from_paths(paths, model_config, include_periodic="eval", run_label="test"):
+    include_periodic = _normalize_policy(include_periodic)
+    random_sequences, repetitive_sequences, run_configs = _sequences_by_stim_group_from_paths(
+        paths,
+        model_config=model_config,
+        run_label=run_label,
+    )
+    if include_periodic == "none":
+        return random_sequences, run_configs
+    return random_sequences + repetitive_sequences, run_configs
+
+
 def _training_split_from_paths(paths, model_config, hyperparams, include_main_periodic="eval"):
     from aisam.comptools.regression_forecaster import split_sequences_by_cell
 
@@ -1340,6 +1359,34 @@ def _save_performance_info(path, metrics, dataset=None, label="evaluation"):
 def _window_error_info(y_true, y_pred):
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
+    if y_true.ndim == 1:
+        y_true = y_true.reshape(-1, 1)
+    if y_pred.ndim == 1:
+        y_pred = y_pred.reshape(-1, 1)
+    finite_mask = np.isfinite(y_true).all(axis=1) & np.isfinite(y_pred).all(axis=1)
+    total_windows = int(y_true.shape[0])
+    invalid_windows = int(total_windows - np.sum(finite_mask))
+    if not finite_mask.any():
+        return {
+            "mean_rmse": np.nan,
+            "median_rmse": np.nan,
+            "std_rmse": np.nan,
+            "min_rmse": np.nan,
+            "max_rmse": np.nan,
+            "mean_log10_rmse": np.nan,
+            "median_log10_rmse": np.nan,
+            "std_log10_rmse": np.nan,
+            "mean_mae": np.nan,
+            "median_mae": np.nan,
+            "std_mae": np.nan,
+            "num_windows": total_windows,
+            "finite_windows": 0,
+            "invalid_windows": invalid_windows,
+            "per_window_rmse": [],
+            "per_window_log10_rmse": [],
+        }
+    y_true = y_true[finite_mask]
+    y_pred = y_pred[finite_mask]
     residual = y_true - y_pred
     per_window_mse = np.mean(residual ** 2, axis=1)
     per_window_rmse = np.sqrt(per_window_mse)
@@ -1357,6 +1404,9 @@ def _window_error_info(y_true, y_pred):
         "mean_mae": float(np.mean(per_window_mae)),
         "median_mae": float(np.median(per_window_mae)),
         "std_mae": float(np.std(per_window_mae)),
+        "num_windows": total_windows,
+        "finite_windows": int(np.sum(finite_mask)),
+        "invalid_windows": invalid_windows,
         "per_window_rmse": per_window_rmse.tolist(),
         "per_window_log10_rmse": log10_rmse.tolist(),
     }
