@@ -60,7 +60,8 @@ AISAM will simulate cells, save the simulation table, train the forecaster, and 
 - A circuit choice such as `ccasr`, `inverter`, `CcaSR_noE`, `CcaSR_ODE`, `Inverter_noE`, or `ODE_Inverter`.
 - A solver choice. Use `gillespy_tau_hybrid` for stochastic/GillesPy2 circuits and `deterministic` for ODE circuits.
 - Simulation size settings: `t_max`, `sampling`, `interval_rate`, `total_cell`, and `num_realizations`.
-- A `forecaster_model` block. The current standard model type is `regressor`.
+- A `forecaster_model` block. Standard model types include `regressor`,
+  `LSTM_encoder_decoder`, and `LSTM_MLP`.
 - Optional circuit parameters. If omitted, AISAM uses defaults from `aisam.model.defaults`. To override them, add a `circuit_parameters` block in the recipe or put `simulation_params.json` next to the recipe.
 
 `total_cell` must be at least `200`. By default, the stimulation panel includes random-stimulation cells plus repetitive stimulation cells for evaluation or training policies.
@@ -190,6 +191,47 @@ They include `training_holdout_performance.json` when training-holdout data is
 available, `test_performance.json`, a combined `performance.json`, and figures
 for both `figures/training_holdout/` and `figures/test/`: `rmse_histogram.svg`,
 `best_prediction.svg`, `worst_prediction.svg`, and `random_prediction.svg`.
+
+## Compare Forecasters Across Datasets
+
+For larger experiments, AISAM can train each configured forecaster on each
+simulation dataset and cross-test it on every other dataset. Put forecaster
+comparison recipes under:
+
+```text
+experiment_root/
+  forecasters/
+    regressor/recipe.json
+    LSTM_encoder_decoder/recipe.json
+    LSTM_MLP/recipe.json
+```
+
+Each recipe should define `id`, `forecaster_model`, and a `datasets` list with
+dataset IDs and paths relative to `experiment_root`. Then run:
+
+```bash
+aisam compare-forecasters --root /path/to/experiment_root
+```
+
+For cluster or multicore runs, launch one matrix row at a time:
+
+```bash
+aisam compare-forecasters \
+  --root /path/to/experiment_root \
+  --forecaster regressor \
+  --train-dataset CcaSR \
+  --skip-periodic-plots
+```
+
+After all rows finish, aggregate the saved row results:
+
+```bash
+aisam compare-forecasters --root /path/to/experiment_root --aggregate-only
+```
+
+Outputs include `mean_rmse_matrix.csv`, `mean_rmse_matrix.json`,
+`mean_rmse_matrix.svg`, `mean_rmse_matrix.png`, and `cross_testing_runs.json`
+inside each `forecasters/{id}/` folder.
 
 ## Useful Recipe Fields
 

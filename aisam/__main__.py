@@ -4,6 +4,10 @@ from os import PathLike
 
 import numpy as np
 
+from aisam.experiments.forecaster_comparison import (
+    add_cli_args as _add_forecaster_comparison_args,
+    run_from_args as _run_forecaster_comparison_from_args,
+)
 from aisam.utils.forecaster_training import cross_test_forecaster, train_forecaster
 from aisam.utils.pipeline import run_recipe
 
@@ -26,6 +30,16 @@ def main(argv=None):
         help="Train/load a forecaster and evaluate it on an external simulation dataset.",
     )
     _add_predict_args(predict)
+    compare = subparsers.add_parser(
+        "compare-forecasters",
+        help="Run a matrix-style forecaster comparison experiment.",
+    )
+    _add_forecaster_comparison_args(compare)
+    comparison_alias = subparsers.add_parser(
+        "forecaster-comparison",
+        help="Compatibility alias for `aisam compare-forecasters`.",
+    )
+    _add_forecaster_comparison_args(comparison_alias)
 
     args = parser.parse_args(argv)
     if args.command in {"run", "simulate"}:
@@ -58,6 +72,10 @@ def main(argv=None):
             include_main_periodic=args.include_main_periodic,
             label=args.label,
         )
+        print(json.dumps(_json_safe(result), indent=2))
+        return 0
+    if args.command in {"compare-forecasters", "forecaster-comparison"}:
+        result = _run_forecaster_comparison_from_args(args)
         print(json.dumps(_json_safe(result), indent=2))
         return 0
 

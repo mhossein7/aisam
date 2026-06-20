@@ -763,6 +763,19 @@ def _is_supported_model_type(model_type):
         "lstm",
         "lstm_encoder_decoder",
         "lstm_encoder_decoder_forecaster",
+        "lstm_mlp",
+        "lstm_mlp_forecaster",
+        "lstm_encoder_mlp",
+        "lstm_mlp_encoder_decoder",
+    }
+
+
+def _is_lstm_mlp_model_type(model_type):
+    return _normalize_model_type(model_type) in {
+        "lstm_mlp",
+        "lstm_mlp_forecaster",
+        "lstm_encoder_mlp",
+        "lstm_mlp_encoder_decoder",
     }
 
 
@@ -832,6 +845,36 @@ def _train_model_from_cells(cells, model_config, hyperparams):
 
 def _build_forecaster(model_type, model_config, hyperparams, window_args, train_sequences):
     feature_dim, input_dim = _sequence_dimensions(train_sequences)
+    if _is_lstm_mlp_model_type(model_type):
+        try:
+            from aisam.comptools.LSTM_MLP_forecaster import LSTMMLPForecaster
+        except ModuleNotFoundError as exc:
+            if exc.name == "torch":
+                raise ImportError("LSTM-MLP forecaster training requires PyTorch to be installed.") from exc
+            raise
+
+        hidden_size = hyperparams.get("hidden_size", hyperparams.get("hidden_dim", 64))
+        return LSTMMLPForecaster(
+            past_feature_window=window_args["past_feature_window"],
+            future_window=window_args["future_window"],
+            past_input_window=window_args["past_input_window"],
+            future_input_window=window_args["future_input_window"],
+            feature_dim=feature_dim,
+            input_dim=input_dim,
+            lstm_units=hyperparams.get("lstm_units", hyperparams.get("encoder_hidden_size", hidden_size)),
+            latent_dim=hyperparams.get("latent_dim", hidden_size),
+            mlp_layers=hyperparams.get("mlp_layers", hyperparams.get("decoder_layers", 2)),
+            mlp_dim=hyperparams.get("mlp_dim", hyperparams.get("decoder_dim", hidden_size)),
+            dropout=hyperparams.get("dropout", 0.0),
+            batch_size=hyperparams.get("batch_size", 32),
+            epochs=hyperparams.get("epochs", 10),
+            learning_rate=hyperparams.get("learning_rate", hyperparams.get("lr", 0.001)),
+            normalize=hyperparams.get("normalize", True),
+            device=hyperparams.get("device"),
+            random_state=hyperparams.get("random_state"),
+            verbose=hyperparams.get("verbose", True),
+        )
+
     if _is_lstm_model_type(model_type):
         try:
             from aisam.comptools.LSTM_encoder_decoder_forecaster import LSTMEncoderDecoderForecaster
@@ -1008,6 +1051,8 @@ def _model_config_from_saved_model_config(saved_config, forecaster):
 
 def _infer_model_type_from_forecaster(forecaster):
     name = type(forecaster).__name__.lower()
+    if "lstmmlp" in name or ("lstm" in name and "mlp" in name):
+        return "lstm_mlp"
     if "lstm" in name:
         return "lstm_encoder_decoder"
     if "transformer" in name:
