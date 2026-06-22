@@ -34,6 +34,7 @@ def run_forecaster_comparison(
     forecaster_root: Optional[PathLike] = None,
     train_dataset: Optional[str] = None,
     aggregate_only: bool = False,
+    prepare_splits_only: bool = False,
     plot_periodic_only: bool = False,
     skip_periodic_plots: bool = False,
     periodic_repeats: int = 10,
@@ -62,10 +63,26 @@ def run_forecaster_comparison(
         "periodic_plots": [],
         "runs": [],
         "aggregates": [],
+        "prepared_splits": [],
     }
+
+    if prepare_splits_only:
+        for recipe_path in recipe_paths:
+            recipe = load_recipe(recipe_path)
+            if _is_mixed_recipe(recipe):
+                result["prepared_splits"].append(
+                    prepare_mixed_splits(
+                        recipe_path=recipe_path,
+                        root=experiment_root,
+                        reuse_existing=False,
+                    )
+                )
+        return result
 
     if plot_periodic_only:
         recipe = load_recipe(recipe_paths[0])
+        if _is_mixed_recipe(recipe):
+            return result
         species = _recipe_reporter_species(recipe, reporter_species)
         dataset_paths = latest_dataset_paths(recipe["datasets"], experiment_root)
         result["periodic_plots"] = plot_periodic_sanity_panels(
@@ -83,14 +100,15 @@ def run_forecaster_comparison(
 
     if recipe_paths and not skip_periodic_plots and train_dataset is None:
         recipe = load_recipe(recipe_paths[0])
-        species = _recipe_reporter_species(recipe, reporter_species)
-        dataset_paths = latest_dataset_paths(recipe["datasets"], experiment_root)
-        result["periodic_plots"] = plot_periodic_sanity_panels(
-            dataset_paths=dataset_paths,
-            root=experiment_root,
-            reporter_species=species,
-            repeats=periodic_repeats,
-        )
+        if not _is_mixed_recipe(recipe):
+            species = _recipe_reporter_species(recipe, reporter_species)
+            dataset_paths = latest_dataset_paths(recipe["datasets"], experiment_root)
+            result["periodic_plots"] = plot_periodic_sanity_panels(
+                dataset_paths=dataset_paths,
+                root=experiment_root,
+                reporter_species=species,
+                repeats=periodic_repeats,
+            )
 
     for recipe_path in recipe_paths:
         result["runs"].append(
@@ -151,6 +169,16 @@ def run_forecaster_recipe(
     recipe_path = Path(recipe_path)
     recipe = load_recipe(recipe_path)
     validate_forecaster_recipe(recipe, recipe_path)
+    if _is_mixed_recipe(recipe):
+        return run_mixed_forecaster_recipe(
+            recipe_path=recipe_path,
+            root=root,
+            train_dataset=train_dataset,
+            reporter_species=reporter_species,
+            visualization=visualization,
+            include_main_periodic=include_main_periodic,
+            include_test_periodic=include_test_periodic,
+        )
 
     experiment_root = Path(root).resolve() if root is not None else infer_experiment_root(recipe_path)
     forecaster_dir = recipe_path.parent
@@ -311,10 +339,303 @@ def run_forecaster_row(
     }
 
 
+def run_mixed_forecaster_recipe(
+    recipe_path,
+    root=None,
+    train_dataset=None,
+    reporter_species=None,
+    visualization=None,
+    include_main_periodic=None,
+    include_test_periodic=None,
+):
+    recipe_path = Path(recipe_path)
+    recipe = load_recipe(recipe_path)
+    validate_forecaster_recipe(recipe, recipe_path)
+
+    experiment_root = Path(root).resolve() if root is not None else infer_experiment_root(recipe_path)
+    forecaster_dir = recipe_path.parent
+    split_info = prepare_mixed_splits(recipe_path=recipe_path, root=experiment_root, reuse_existing=True)
+    groups = split_info["groups"]
+    group_ids = [group["id"] for group in groups]
+    test_ids = _mixed_test_ids(recipe)
+    species = _recipe_reporter_species(recipe, reporter_species)
+    model_config = reporter_only_model_config(
+        recipe["forecaster_model"],
+        _mixed_validation_paths(groups),
+        species,
+    )
+    train_policy = _normalize_policy(
+        include_main_periodic
+        if include_main_periodic is not None
+        else recipe.get("include_main_periodic", DEFAULT_INCLUDE_MAIN_PERIODIC)
+    )
+    test_policy = _normalize_policy(
+        include_test_periodic
+        if include_test_periodic is not None
+        else recipe.get("include_test_periodic", DEFAULT_INCLUDE_TEST_PERIODIC)
+    )
+    use_visualization = (
+        bool(visualization)
+        if visualization is not None
+        else bool(recipe.get("visualization", True))
+    )
+
+    print_model_setup(recipe["id"], model_config, train_policy, test_policy)
+
+    if train_dataset is not None:
+        selected = next((group for group in groups if group["id"] == train_dataset), None)
+        if selected is None:
+            raise ValueError(
+                f"Unknown mixed train group {train_dataset!r}. Available groups: {group_ids}"
+            )
+        return run_mixed_forecaster_row(
+            recipe=recipe,
+            forecaster_dir=forecaster_dir,
+            group=selected,
+            test_ids=test_ids,
+            model_config=model_config,
+            include_main_periodic=train_policy,
+            include_test_periodic=test_policy,
+            visualization=use_visualization,
+        )
+
+    row_results = []
+    for group in groups:
+        row_results.append(
+            run_mixed_forecaster_row(
+                recipe=recipe,
+                forecaster_dir=forecaster_dir,
+                group=group,
+                test_ids=test_ids,
+                model_config=model_config,
+                include_main_periodic=train_policy,
+                include_test_periodic=test_policy,
+                visualization=use_visualization,
+            )
+        )
+
+    aggregate = aggregate_mixed_forecaster_recipe(recipe_path)
+    print(f"Saved {recipe['id']} mixed matrix to {forecaster_dir / 'mean_rmse_matrix.csv'}", flush=True)
+    return {
+        "recipe": recipe_path,
+        "forecaster_id": recipe["id"],
+        "rows": row_results,
+        "aggregate": aggregate,
+        "split_info": split_info,
+    }
+
+
+def run_mixed_forecaster_row(
+    recipe,
+    forecaster_dir,
+    group,
+    test_ids,
+    model_config,
+    include_main_periodic=DEFAULT_INCLUDE_MAIN_PERIODIC,
+    include_test_periodic=DEFAULT_INCLUDE_TEST_PERIODIC,
+    visualization=True,
+):
+    group_id = group["id"]
+    row_values = {test_id: None for test_id in test_ids}
+    run_records = []
+    trained_model = None
+    training_paths = [Path(path) for path in group["training_paths"]]
+    test_paths = {test_id: Path(path) for test_id, path in group["test_paths"].items()}
+
+    for test_id in test_ids:
+        label = f"{group_id}_to_{test_id}"
+        output_root = Path(forecaster_dir) / "runs" / safe_filename(group_id)
+        if trained_model is None:
+            print(
+                f"[{recipe['id']}] training on mixed group {group_id} "
+                f"({[str(path) for path in training_paths]}) and testing on {test_id} "
+                f"({test_paths[test_id]})",
+                flush=True,
+            )
+            result = cross_test_forecaster(
+                model=model_config,
+                training_data=training_paths,
+                test_data=test_paths[test_id],
+                output_root=output_root,
+                label=label,
+                random_state=recipe.get("random_seed"),
+                include_main_periodic=include_main_periodic,
+                include_test_periodic=include_test_periodic,
+                visualization=visualization,
+            )
+            trained_model = result["model_path"]
+        else:
+            print(
+                f"[{recipe['id']}] reusing model trained on mixed group {group_id} "
+                f"({trained_model}) and testing on {test_id} ({test_paths[test_id]})",
+                flush=True,
+            )
+            result = cross_test_forecaster(
+                trained_model=trained_model,
+                test_data=test_paths[test_id],
+                output_root=output_root,
+                label=label,
+                random_state=recipe.get("random_seed"),
+                include_test_periodic=include_test_periodic,
+                visualization=visualization,
+            )
+
+        test_metrics = result["metrics"]["test"]
+        mean_rmse = test_metrics.get("rmse")
+        finite_windows = test_metrics.get("finite_windows")
+        invalid_windows = test_metrics.get("invalid_windows")
+        print(
+            f"[{recipe['id']}] completed train={group_id}, test={test_id}, "
+            f"mean RMSE={_format_float(mean_rmse)}, "
+            f"finite windows={finite_windows}, invalid windows={invalid_windows}",
+            flush=True,
+        )
+        row_values[test_id] = mean_rmse
+        run_records.append(
+            {
+                "train_dataset": group_id,
+                "test_dataset": test_id,
+                "training_paths": training_paths,
+                "test_path": test_paths[test_id],
+                "mean_rmse": mean_rmse,
+                "finite_windows": finite_windows,
+                "invalid_windows": invalid_windows,
+                "output_dir": result["output_dir"],
+                "test_performance_path": result["test_performance_path"],
+                "training_holdout_performance_path": result["training_holdout_performance_path"],
+            }
+        )
+
+        save_row_outputs(forecaster_dir, group_id, test_ids, row_values, run_records)
+
+    row_dir = Path(forecaster_dir) / "row_results"
+    print(f"[{recipe['id']}] saved mixed row results for train={group_id}", flush=True)
+    return {
+        "forecaster_id": recipe["id"],
+        "train_dataset": group_id,
+        "row_json": row_dir / f"{safe_filename(group_id)}.json",
+        "row_csv": row_dir / f"{safe_filename(group_id)}.csv",
+        "run_records": run_records,
+    }
+
+
+def aggregate_mixed_forecaster_recipe(recipe_path):
+    recipe_path = Path(recipe_path)
+    recipe = load_recipe(recipe_path)
+    validate_forecaster_recipe(recipe, recipe_path)
+    forecaster_dir = recipe_path.parent
+    group_ids = [group["id"] for group in recipe["mixed_groups"]]
+    test_ids = _mixed_test_ids(recipe)
+    row_dir = forecaster_dir / "row_results"
+    matrix = pd.DataFrame(index=group_ids, columns=test_ids, dtype=float)
+    run_records = []
+    missing_rows = []
+
+    for group_id in group_ids:
+        row_path = row_dir / f"{safe_filename(group_id)}.json"
+        if not row_path.exists():
+            missing_rows.append(group_id)
+            continue
+        with open(row_path, "r") as f:
+            row = json.load(f)
+        values = row.get("mean_rmse_by_test", {})
+        for test_id in test_ids:
+            value = values.get(test_id)
+            matrix.loc[group_id, test_id] = np.nan if value is None else float(value)
+        run_records.extend(row.get("run_records", []))
+
+    outputs = save_matrix_outputs(matrix, run_records, forecaster_dir, recipe["id"])
+    if missing_rows:
+        print(
+            f"[{recipe['id']}] aggregated partial mixed matrix; missing rows: {missing_rows}",
+            flush=True,
+        )
+    else:
+        print(f"[{recipe['id']}] aggregated complete mixed matrix", flush=True)
+
+    return {
+        "recipe": recipe_path,
+        "forecaster_id": recipe["id"],
+        "missing_rows": missing_rows,
+        "outputs": outputs,
+    }
+
+
+def prepare_mixed_splits(recipe_path, root=None, reuse_existing=True):
+    recipe_path = Path(recipe_path)
+    recipe = load_recipe(recipe_path)
+    validate_forecaster_recipe(recipe, recipe_path)
+    if not _is_mixed_recipe(recipe):
+        return {"recipe": recipe_path, "groups": []}
+
+    experiment_root = Path(root).resolve() if root is not None else infer_experiment_root(recipe_path)
+    split_config = recipe.get("split", {})
+    split_root = _resolve_path(split_config.get("root", "splits"), base=experiment_root)
+    test_fraction = float(split_config.get("test_fraction", 0.2))
+    random_seed = int(split_config.get("random_seed", recipe.get("random_seed", 0)))
+    if test_fraction <= 0 or test_fraction >= 1:
+        raise ValueError("split.test_fraction must be in the range (0, 1).")
+
+    prepared_groups = []
+    for group_index, group in enumerate(recipe["mixed_groups"]):
+        group_id = group["id"]
+        training_paths = []
+        test_paths = {}
+        source_infos = []
+        for source_index, source in enumerate(group["sources"]):
+            source_id = dataset_id(source)
+            test_id = source.get("test_id", source.get("test_label", source_id))
+            source_path = latest_simulation_file(_resolve_path(dataset_path(source), base=experiment_root))
+            source_split_root = split_root / safe_filename(group_id) / safe_filename(source_id)
+            train_path = source_split_root / "train_pool" / "simulation.parquet"
+            test_path = source_split_root / "individual_test" / "simulation.parquet"
+            manifest_path = source_split_root / "split_manifest.json"
+            if not reuse_existing or not (train_path.exists() and test_path.exists() and manifest_path.exists()):
+                _write_random_cell_split(
+                    source_path=source_path,
+                    train_path=train_path,
+                    test_path=test_path,
+                    manifest_path=manifest_path,
+                    source_id=source_id,
+                    group_id=group_id,
+                    test_fraction=test_fraction,
+                    random_seed=random_seed + group_index * 1009 + source_index,
+                )
+            training_paths.append(train_path)
+            test_paths[test_id] = test_path
+            source_infos.append(
+                {
+                    "source_id": source_id,
+                    "test_id": test_id,
+                    "source_path": source_path,
+                    "train_path": train_path,
+                    "test_path": test_path,
+                    "manifest_path": manifest_path,
+                }
+            )
+        prepared_groups.append(
+            {
+                "id": group_id,
+                "training_paths": training_paths,
+                "test_paths": test_paths,
+                "sources": source_infos,
+            }
+        )
+
+    return {
+        "recipe": recipe_path,
+        "split_root": split_root,
+        "groups": prepared_groups,
+    }
+
+
 def aggregate_forecaster_recipe(recipe_path):
     recipe_path = Path(recipe_path)
     recipe = load_recipe(recipe_path)
     validate_forecaster_recipe(recipe, recipe_path)
+    if _is_mixed_recipe(recipe):
+        return aggregate_mixed_forecaster_recipe(recipe_path)
+
     forecaster_dir = recipe_path.parent
     dataset_ids = [dataset_id(dataset) for dataset in recipe["datasets"]]
     row_dir = forecaster_dir / "row_results"
@@ -366,11 +687,178 @@ def validate_forecaster_recipe(recipe, recipe_path=None):
         raise ValueError(f"Forecaster recipe{location} must define `id`.")
     if "forecaster_model" not in recipe:
         raise ValueError(f"Forecaster recipe{location} must define `forecaster_model`.")
+    if _is_mixed_recipe(recipe):
+        if not isinstance(recipe.get("mixed_groups"), list) or not recipe["mixed_groups"]:
+            raise ValueError(f"Mixed forecaster recipe{location} must define a non-empty `mixed_groups` list.")
+        for group in recipe["mixed_groups"]:
+            if not isinstance(group, Mapping):
+                raise ValueError(f"Mixed group entries{location} must be objects.")
+            if not group.get("id"):
+                raise ValueError(f"Mixed group entries{location} must define `id`.")
+            if not isinstance(group.get("sources"), list) or len(group["sources"]) < 2:
+                raise ValueError(f"Mixed group {group.get('id')!r}{location} must define at least two sources.")
+            for source in group["sources"]:
+                dataset_id(source)
+                dataset_path(source)
+        return
     if not isinstance(recipe.get("datasets"), list) or not recipe["datasets"]:
         raise ValueError(f"Forecaster recipe{location} must define a non-empty `datasets` list.")
     for dataset in recipe["datasets"]:
         dataset_id(dataset)
         dataset_path(dataset)
+
+
+def _is_mixed_recipe(recipe):
+    mode = str(recipe.get("mode", "")).strip().lower().replace("-", "_").replace(" ", "_")
+    return mode in {"mixed_cross_testing", "mixed_cross_testing_matrix"} or "mixed_groups" in recipe
+
+
+def _mixed_test_ids(recipe):
+    test_ids = []
+    for group in recipe.get("mixed_groups", []):
+        for source in group.get("sources", []):
+            test_id = source.get("test_id", source.get("test_label", dataset_id(source)))
+            if test_id not in test_ids:
+                test_ids.append(test_id)
+    return test_ids
+
+
+def _mixed_validation_paths(groups):
+    paths = {}
+    for group in groups:
+        for index, path in enumerate(group.get("training_paths", []), start=1):
+            paths[f"{group['id']}_train_{index}"] = path
+        for test_id, path in group.get("test_paths", {}).items():
+            paths[f"{group['id']}_test_{test_id}"] = path
+    return paths
+
+
+def _write_random_cell_split(
+    source_path,
+    train_path,
+    test_path,
+    manifest_path,
+    source_id,
+    group_id,
+    test_fraction,
+    random_seed,
+):
+    source_path = Path(source_path)
+    dataframe = pd.read_parquet(source_path)
+    random_cell_ids = _source_random_cell_ids(source_path, dataframe)
+    rng = np.random.default_rng(random_seed)
+    shuffled = np.array(random_cell_ids, dtype=object)
+    rng.shuffle(shuffled)
+    num_test = int(np.ceil(len(shuffled) * float(test_fraction)))
+    num_test = min(max(num_test, 1), len(shuffled) - 1)
+    test_draw_order = shuffled[:num_test].tolist()
+    train_draw_order = shuffled[num_test:].tolist()
+    test_ids = set(test_draw_order)
+    train_ids = set(train_draw_order)
+
+    train_frame = dataframe[dataframe["cell_id"].isin(train_ids)].copy()
+    test_frame = dataframe[dataframe["cell_id"].isin(test_ids)].copy()
+    train_mapping = _remap_cell_ids(train_frame)
+    test_mapping = _remap_cell_ids(test_frame)
+    _write_split_dataset(train_frame, train_path, source_path, len(train_mapping))
+    _write_split_dataset(test_frame, test_path, source_path, len(test_mapping))
+
+    manifest = {
+        "group_id": group_id,
+        "source_id": source_id,
+        "source_path": source_path,
+        "split_method": "seeded_random_shuffle_by_cell_id",
+        "random_stimulation_only": True,
+        "test_fraction": test_fraction,
+        "random_seed": random_seed,
+        "random_source_cells": len(random_cell_ids),
+        "train_cells": len(train_mapping),
+        "test_cells": len(test_mapping),
+        "train_path": train_path,
+        "test_path": test_path,
+        "train_source_cell_ids_draw_order": train_draw_order,
+        "test_source_cell_ids_draw_order": test_draw_order,
+        "train_cell_id_map": train_mapping,
+        "test_cell_id_map": test_mapping,
+    }
+    manifest_path = Path(manifest_path)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(manifest_path, "w") as f:
+        json.dump(json_safe(manifest), f, indent=2)
+
+
+def _source_random_cell_ids(source_path, dataframe):
+    config = _source_run_config(source_path)
+    simulated_cells = config.get("simulated_cells", {})
+    random_range = simulated_cells.get("random_stimulation_cells")
+    cell_ids = list(dict.fromkeys(dataframe["cell_id"].tolist()))
+    if random_range and len(random_range) == 2:
+        start, end = [int(value) for value in random_range]
+        return [
+            cell_id
+            for cell_id in cell_ids
+            if start <= int(cell_id) <= end
+        ]
+
+    numeric_ids = sorted(int(cell_id) for cell_id in cell_ids)
+    total_cells = max(numeric_ids)
+    random_end = total_cells - 100 if total_cells >= 200 else total_cells
+    return [cell_id for cell_id in cell_ids if int(cell_id) <= random_end]
+
+
+def _source_run_config(source_path):
+    config_path = Path(source_path).parent / "config.json"
+    if not config_path.exists():
+        return {}
+    with open(config_path, "r") as f:
+        return json.load(f)
+
+
+def _remap_cell_ids(dataframe):
+    original_ids = sorted(
+        dict.fromkeys(dataframe["cell_id"].tolist()),
+        key=lambda value: int(value),
+    )
+    mapping = {cell_id: index + 1 for index, cell_id in enumerate(original_ids)}
+    dataframe["source_cell_id"] = dataframe["cell_id"]
+    dataframe["cell_id"] = dataframe["cell_id"].map(mapping).astype(int)
+    return {str(source): target for source, target in mapping.items()}
+
+
+def _write_split_dataset(dataframe, output_path, source_path, total_cells):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    dataframe.to_parquet(output_path, index=False)
+    _write_split_config(output_path, source_path, total_cells)
+
+
+def _write_split_config(output_path, source_path, total_cells):
+    output_path = Path(output_path)
+    source_config = _source_run_config(source_path)
+    source_simulated = source_config.get("simulated_cells", {})
+    config = {
+        "source_simulation_file": str(source_path),
+        "simulation_file": str(output_path),
+        "simulation_data_file": str(output_path),
+        "simulation_parquet_file": str(output_path),
+        "data_format": "parquet_long_v1",
+        "data_columns": ["cell_id", "realization", "species", "stim", "time", "value", "source_cell_id"],
+        "simulated_cells": {
+            "total_cells": int(total_cells),
+            "random_stimulation_cells": [1, int(total_cells)],
+            "repetitive_stimulation_cells_red_first": [],
+            "repetitive_stimulation_cells_green_first": [],
+            "include_repetitive_stims": False,
+            "num_realizations": source_simulated.get("num_realizations"),
+            "t_max": source_simulated.get("t_max"),
+            "sampling": source_simulated.get("sampling"),
+            "saved_sampling": source_simulated.get("saved_sampling"),
+            "sample_interval_minutes": source_simulated.get("sample_interval_minutes"),
+        },
+        "source_config": source_config,
+    }
+    with open(output_path.parent / "config.json", "w") as f:
+        json.dump(json_safe(config), f, indent=2)
 
 
 def latest_dataset_paths(datasets, root):
@@ -753,6 +1241,11 @@ def add_cli_args(parser):
         help="Aggregate row_results into matrix CSV/JSON/plots without running training.",
     )
     parser.add_argument(
+        "--prepare-splits-only",
+        action="store_true",
+        help="Prepare mixed-comparison split parquet files and exit.",
+    )
+    parser.add_argument(
         "--plot-periodic-only",
         action="store_true",
         help="Only create periodic sanity plots and exit.",
@@ -807,6 +1300,7 @@ def run_from_args(args):
         forecaster_root=args.forecaster_root,
         train_dataset=args.train_dataset,
         aggregate_only=args.aggregate_only,
+        prepare_splits_only=args.prepare_splits_only,
         plot_periodic_only=args.plot_periodic_only,
         skip_periodic_plots=args.skip_periodic_plots,
         periodic_repeats=args.periodic_repeats,
