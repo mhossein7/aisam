@@ -186,7 +186,12 @@ def run_forecaster_recipe(
     dataset_ids = [dataset_id(dataset) for dataset in datasets]
     dataset_paths = latest_dataset_paths(datasets, experiment_root)
     species = _recipe_reporter_species(recipe, reporter_species)
-    model_config = reporter_only_model_config(recipe["forecaster_model"], dataset_paths, species)
+    model_config = reporter_only_model_config(
+        recipe["forecaster_model"],
+        dataset_paths,
+        species,
+        force_reporter_only=reporter_species is not None,
+    )
     train_policy = _normalize_policy(
         include_main_periodic
         if include_main_periodic is not None
@@ -363,6 +368,7 @@ def run_mixed_forecaster_recipe(
         recipe["forecaster_model"],
         _mixed_validation_paths(groups),
         species,
+        force_reporter_only=reporter_species is not None,
     )
     train_policy = _normalize_policy(
         include_main_periodic
@@ -576,6 +582,17 @@ def prepare_mixed_splits(recipe_path, root=None, reuse_existing=True):
     if test_fraction <= 0 or test_fraction >= 1:
         raise ValueError("split.test_fraction must be in the range (0, 1).")
 
+    if recipe.get("test_sources"):
+        return _prepare_mixed_splits_with_test_sources(
+            recipe=recipe,
+            recipe_path=recipe_path,
+            experiment_root=experiment_root,
+            split_root=split_root,
+            test_fraction=test_fraction,
+            random_seed=random_seed,
+            reuse_existing=reuse_existing,
+        )
+
     prepared_groups = []
     for group_index, group in enumerate(recipe["mixed_groups"]):
         group_id = group["id"]
@@ -584,7 +601,7 @@ def prepare_mixed_splits(recipe_path, root=None, reuse_existing=True):
         source_infos = []
         for source_index, source in enumerate(group["sources"]):
             source_id = dataset_id(source)
-            test_id = source.get("test_id", source.get("test_label", source_id))
+            test_id = source_test_id(source)
             source_path = latest_simulation_file(_resolve_path(dataset_path(source), base=experiment_root))
             source_split_root = split_root / safe_filename(group_id) / safe_filename(source_id)
             train_path = source_split_root / "train_pool" / "simulation.parquet"
@@ -626,6 +643,132 @@ def prepare_mixed_splits(recipe_path, root=None, reuse_existing=True):
         "recipe": recipe_path,
         "split_root": split_root,
         "groups": prepared_groups,
+    }
+
+
+def _prepare_mixed_splits_with_test_sources(
+    recipe,
+    recipe_path,
+    experiment_root,
+    split_root,
+    test_fraction,
+    random_seed,
+    reuse_existing=True,
+):
+    source_defs = {}
+    ordered_source_ids = []
+
+    def add_source(source, source_seed):
+        source_id = dataset_id(source)
+        source_path = dataset_path(source)
+        if source_id in source_defs:
+            existing_path = dataset_path(source_defs[source_id]["source"])
+            if str(existing_path) != str(source_path):
+                raise ValueError(
+                    f"Mixed source {source_id!r} is defined with multiple paths: "
+                    f"{existing_path!r} and {source_path!r}."
+                )
+            return
+        source_defs[source_id] = {
+            "source": source,
+            "random_seed": int(source_seed),
+        }
+        ordered_source_ids.append(source_id)
+
+    for group_index, group in enumerate(recipe["mixed_groups"]):
+        for source_index, source in enumerate(group["sources"]):
+            add_source(source, random_seed + group_index * 1009 + source_index)
+
+    extra_index = 0
+    for source in recipe["test_sources"]:
+        source_id = dataset_id(source)
+        if source_id not in source_defs:
+            add_source(source, random_seed + 50000 + extra_index)
+        extra_index += 1
+
+    source_splits = {}
+    for source_id in ordered_source_ids:
+        source_info = source_defs[source_id]
+        source = source_info["source"]
+        source_path = latest_simulation_file(_resolve_path(dataset_path(source), base=experiment_root))
+        source_split_root = split_root / "sources" / safe_filename(source_id)
+        train_path = source_split_root / "train_pool" / "simulation.parquet"
+        test_path = source_split_root / "individual_test" / "simulation.parquet"
+        manifest_path = source_split_root / "split_manifest.json"
+        if not reuse_existing or not (train_path.exists() and test_path.exists() and manifest_path.exists()):
+            _write_random_cell_split(
+                source_path=source_path,
+                train_path=train_path,
+                test_path=test_path,
+                manifest_path=manifest_path,
+                source_id=source_id,
+                group_id="shared_mixed_sources",
+                test_fraction=test_fraction,
+                random_seed=source_info["random_seed"],
+            )
+        source_splits[source_id] = {
+            "source_id": source_id,
+            "source_path": source_path,
+            "train_path": train_path,
+            "test_path": test_path,
+            "manifest_path": manifest_path,
+            "random_seed": source_info["random_seed"],
+        }
+
+    test_source_infos = []
+    test_paths = {}
+    for source in recipe["test_sources"]:
+        source_id = dataset_id(source)
+        test_id = source_test_id(source)
+        split_info = source_splits[source_id]
+        test_paths[test_id] = split_info["test_path"]
+        test_source_infos.append(
+            {
+                "source_id": source_id,
+                "test_id": test_id,
+                "source_path": split_info["source_path"],
+                "train_path": split_info["train_path"],
+                "test_path": split_info["test_path"],
+                "manifest_path": split_info["manifest_path"],
+                "random_seed": split_info["random_seed"],
+            }
+        )
+
+    prepared_groups = []
+    for group in recipe["mixed_groups"]:
+        group_id = group["id"]
+        training_paths = []
+        source_infos = []
+        for source in group["sources"]:
+            source_id = dataset_id(source)
+            split_info = source_splits[source_id]
+            training_paths.append(split_info["train_path"])
+            source_infos.append(
+                {
+                    "source_id": source_id,
+                    "source_path": split_info["source_path"],
+                    "train_path": split_info["train_path"],
+                    "test_path": split_info["test_path"],
+                    "manifest_path": split_info["manifest_path"],
+                    "random_seed": split_info["random_seed"],
+                }
+            )
+        prepared_groups.append(
+            {
+                "id": group_id,
+                "training_paths": training_paths,
+                "test_paths": dict(test_paths),
+                "sources": source_infos,
+                "test_sources": test_source_infos,
+            }
+        )
+
+    return {
+        "recipe": recipe_path,
+        "split_root": split_root,
+        "groups": prepared_groups,
+        "test_sources": test_source_infos,
+        "source_splits": source_splits,
     }
 
 
@@ -690,6 +833,19 @@ def validate_forecaster_recipe(recipe, recipe_path=None):
     if _is_mixed_recipe(recipe):
         if not isinstance(recipe.get("mixed_groups"), list) or not recipe["mixed_groups"]:
             raise ValueError(f"Mixed forecaster recipe{location} must define a non-empty `mixed_groups` list.")
+        if "test_sources" in recipe:
+            if not isinstance(recipe.get("test_sources"), list) or not recipe["test_sources"]:
+                raise ValueError(f"Mixed forecaster recipe{location} must define a non-empty `test_sources` list.")
+            test_ids = []
+            for source in recipe["test_sources"]:
+                dataset_id(source)
+                dataset_path(source)
+                test_id = source_test_id(source)
+                if test_id in test_ids:
+                    raise ValueError(
+                        f"Mixed forecaster recipe{location} has duplicate test source label {test_id!r}."
+                    )
+                test_ids.append(test_id)
         for group in recipe["mixed_groups"]:
             if not isinstance(group, Mapping):
                 raise ValueError(f"Mixed group entries{location} must be objects.")
@@ -714,10 +870,13 @@ def _is_mixed_recipe(recipe):
 
 
 def _mixed_test_ids(recipe):
+    if recipe.get("test_sources"):
+        return [source_test_id(source) for source in recipe["test_sources"]]
+
     test_ids = []
     for group in recipe.get("mixed_groups", []):
         for source in group.get("sources", []):
-            test_id = source.get("test_id", source.get("test_label", dataset_id(source)))
+            test_id = source_test_id(source)
             if test_id not in test_ids:
                 test_ids.append(test_id)
     return test_ids
@@ -894,18 +1053,31 @@ def latest_simulation_file(dataset_root):
     return candidates[0]
 
 
-def reporter_only_model_config(model_config, dataset_paths, reporter_species=DEFAULT_REPORTER_SPECIES):
+def reporter_only_model_config(
+    model_config,
+    dataset_paths,
+    reporter_species=DEFAULT_REPORTER_SPECIES,
+    force_reporter_only=False,
+):
     model_config = copy.deepcopy(model_config)
-    species = reporter_species or model_config.get("output_species") or DEFAULT_REPORTER_SPECIES
-    model_config["feature_species"] = [species]
-    model_config["output_species"] = species
+    output_species = reporter_species or model_config.get("output_species") or DEFAULT_REPORTER_SPECIES
+    if force_reporter_only:
+        feature_species = [output_species]
+    else:
+        feature_species = model_config.get("feature_species") or [output_species]
+        if isinstance(feature_species, str):
+            feature_species = [feature_species]
+        else:
+            feature_species = list(feature_species)
+    model_config["feature_species"] = feature_species
+    model_config["output_species"] = output_species
     model_config.setdefault("past_input_window", model_config.get("past_feature_window"))
     model_config.setdefault("future_input_window", model_config.get("future_window"))
     species_by_dataset = {
         dataset_id: species_in_simulation_file(path)
         for dataset_id, path in dataset_paths.items()
     }
-    validate_feature_species([species], species_by_dataset, species)
+    validate_feature_species(feature_species, species_by_dataset, output_species)
     return model_config
 
 
@@ -919,7 +1091,7 @@ def print_model_setup(forecaster_id, model_config, include_main_periodic, includ
         f"future_input_window={model_config.get('future_input_window')}; "
         f"feature_species={model_config['feature_species']}; "
         f"output_species={model_config['output_species']}; "
-        f"input layout=past {model_config['output_species']} + past stim + future stim; "
+        f"input layout=past feature_species + past stim + future stim; "
         f"training periodic policy={include_main_periodic}; "
         f"test periodic policy={include_test_periodic}",
         flush=True,
@@ -1184,6 +1356,10 @@ def dataset_path(dataset):
         if value:
             return value
     raise ValueError(f"Dataset {dataset!r} must define a path.")
+
+
+def source_test_id(source):
+    return str(source.get("test_id", source.get("test_label", dataset_id(source))))
 
 
 def infer_experiment_root(recipe_path):
