@@ -327,6 +327,7 @@ def _config_from_recipe(recipe):
         "output_root": ("output_root",),
         "save_parquet": ("save_parquet",),
         "save_pickle": ("save_pickle",),
+        "sanity_species": ("sanity_species",),
     }
     for target, aliases in key_map.items():
         value = _first_present(recipe, aliases)

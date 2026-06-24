@@ -27,10 +27,13 @@ class Cell_sim():
         model_factories = {
             "ccasr": models.CcaSR,
             "inverter": models.CcaSR_Inverter,
+            "double_inverter": models.CcaSR_double_Inverter,
             "ccasr_noe": models.CcaSR_noE,
             "inverter_noe": models.CcaSR_Inverter_noE,
+            "double_inverter_noe": models.CcaSR_double_Inverter_noE,
             "ccasr_ode": models.ODE_CcaSR,
             "ode_inverter": models.ODE_CcaSR_Inverter,
+            "ode_double_inverter": models.ODE_CcaSR_double_Inverter,
         }
         if self.circuit not in model_factories:
             raise ValueError(
