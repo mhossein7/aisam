@@ -233,6 +233,17 @@ Outputs include `mean_rmse_matrix.csv`, `mean_rmse_matrix.json`,
 `mean_rmse_matrix.svg`, `mean_rmse_matrix.png`, and `cross_testing_runs.json`
 inside each `forecasters/{id}/` folder.
 
+To compare all selected forecaster matrices on one global heatmap scale, run:
+
+```bash
+aisam forecaster-comparison \
+  --root /path/to/experiment_root \
+  --plot-forecaster-matrices-only
+```
+
+This saves `forecaster_rmse_matrices.svg` and `forecaster_rmse_matrices.png`
+in the experiment root.
+
 ## Useful Recipe Fields
 
 - `mode`: `full`, `simulation`, `training`, or `sanity`.

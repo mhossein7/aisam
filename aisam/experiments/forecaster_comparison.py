@@ -35,6 +35,7 @@ def run_forecaster_comparison(
     train_dataset: Optional[str] = None,
     aggregate_only: bool = False,
     prepare_splits_only: bool = False,
+    plot_forecaster_matrices_only: bool = False,
     plot_periodic_only: bool = False,
     skip_periodic_plots: bool = False,
     periodic_repeats: int = 10,
@@ -64,7 +65,14 @@ def run_forecaster_comparison(
         "runs": [],
         "aggregates": [],
         "prepared_splits": [],
+        "combined_matrix_plots": [],
     }
+
+    if plot_forecaster_matrices_only:
+        result["combined_matrix_plots"].append(
+            plot_forecaster_rmse_matrices(recipe_paths=recipe_paths, root=experiment_root)
+        )
+        return result
 
     if prepare_splits_only:
         for recipe_path in recipe_paths:
@@ -96,6 +104,10 @@ def run_forecaster_comparison(
     if aggregate_only:
         for recipe_path in recipe_paths:
             result["aggregates"].append(aggregate_forecaster_recipe(recipe_path))
+        if len(recipe_paths) > 1:
+            result["combined_matrix_plots"].append(
+                plot_forecaster_rmse_matrices(recipe_paths=recipe_paths, root=experiment_root)
+            )
         return result
 
     if recipe_paths and not skip_periodic_plots and train_dataset is None:
@@ -121,6 +133,11 @@ def run_forecaster_comparison(
                 include_main_periodic=include_main_periodic,
                 include_test_periodic=include_test_periodic,
             )
+        )
+
+    if train_dataset is None and len(recipe_paths) > 1:
+        result["combined_matrix_plots"].append(
+            plot_forecaster_rmse_matrices(recipe_paths=recipe_paths, root=experiment_root)
         )
 
     return result
@@ -1208,6 +1225,173 @@ def plot_rmse_matrix(matrix, output_path, title):
     plt.close(fig)
 
 
+def plot_forecaster_rmse_matrices(recipe_paths, root=None, output_prefix="forecaster_rmse_matrices"):
+    """
+    Plot all selected forecaster RMSE matrices side by side with one global color scale.
+
+    Each recipe must already have a ``mean_rmse_matrix.csv`` in its forecaster
+    directory. This makes the function usable after full runs, after
+    aggregation, or as a plotting-only pass over existing experiment folders.
+    """
+    recipe_paths = [Path(path) for path in recipe_paths]
+    if not recipe_paths:
+        raise ValueError("At least one forecaster recipe is required for combined matrix plotting.")
+
+    entries = []
+    missing = []
+    for recipe_path in recipe_paths:
+        recipe = load_recipe(recipe_path)
+        forecaster_id = str(recipe.get("id", recipe_path.parent.name))
+        matrix_path = recipe_path.parent / "mean_rmse_matrix.csv"
+        if not matrix_path.exists():
+            missing.append(matrix_path)
+            continue
+        matrix = pd.read_csv(matrix_path, index_col=0)
+        matrix = matrix.apply(pd.to_numeric, errors="coerce")
+        entries.append(
+            {
+                "forecaster_id": forecaster_id,
+                "matrix": matrix,
+                "matrix_path": matrix_path,
+            }
+        )
+
+    if missing:
+        missing_text = ", ".join(str(path) for path in missing)
+        raise FileNotFoundError(
+            "Cannot plot combined forecaster matrix panel because these files are missing: "
+            f"{missing_text}. Run aggregation first."
+        )
+    if not entries:
+        raise ValueError("No forecaster RMSE matrices were available to plot.")
+
+    output_root = Path(root).resolve() if root is not None else infer_experiment_root(recipe_paths[0])
+    output_root.mkdir(parents=True, exist_ok=True)
+    outputs = {
+        "svg": output_root / f"{output_prefix}.svg",
+        "png": output_root / f"{output_prefix}.png",
+    }
+    title = "Forecaster cross-testing mean RMSE"
+    scale = _global_rmse_scale([entry["matrix"] for entry in entries])
+    for output_path in outputs.values():
+        plot_forecaster_rmse_matrix_panel(
+            entries=entries,
+            output_path=output_path,
+            title=title,
+            vmin=scale["vmin"],
+            vmax=scale["vmax"],
+            midpoint=scale["midpoint"],
+        )
+
+    return {
+        "outputs": outputs,
+        "forecasters": [entry["forecaster_id"] for entry in entries],
+        "matrix_paths": [entry["matrix_path"] for entry in entries],
+        "vmin": scale["vmin"],
+        "vmax": scale["vmax"],
+        "midpoint": scale["midpoint"],
+    }
+
+
+def _global_rmse_scale(matrices):
+    finite_chunks = []
+    for matrix in matrices:
+        values = matrix.astype(float).to_numpy()
+        finite = values[np.isfinite(values)]
+        if finite.size:
+            finite_chunks.append(finite)
+
+    if not finite_chunks:
+        return {"vmin": 0.0, "vmax": 1.0, "midpoint": 0.5}
+
+    finite_values = np.concatenate(finite_chunks)
+    vmin = float(np.nanmin(finite_values))
+    vmax = float(np.nanmax(finite_values))
+    if vmin == vmax:
+        pad = max(1.0, abs(vmin) * 0.05)
+        vmin -= pad
+        vmax += pad
+    midpoint = float(np.nanmedian(finite_values))
+    return {"vmin": vmin, "vmax": vmax, "midpoint": midpoint}
+
+
+def plot_forecaster_rmse_matrix_panel(entries, output_path, title, vmin=None, vmax=None, midpoint=None):
+    import os
+
+    os.environ.setdefault("MPLCONFIGDIR", str(Path(output_path).parent / ".matplotlib-cache"))
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    from matplotlib import pyplot as plt
+
+    output_path = Path(output_path)
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("#f1f1f1")
+
+    max_rows = max(len(entry["matrix"].index) for entry in entries)
+    max_cols = max(len(entry["matrix"].columns) for entry in entries)
+    panel_width = max(4.2, 0.58 * max_cols + 1.8)
+    fig_width = max(8.0, panel_width * len(entries) + 1.2)
+    fig_height = max(4.8, 0.62 * max_rows + 2.7)
+    fig, axes = plt.subplots(
+        nrows=1,
+        ncols=len(entries),
+        figsize=(fig_width, fig_height),
+        squeeze=False,
+        constrained_layout=True,
+    )
+    axes = axes[0]
+
+    image = None
+    for axis_index, (ax, entry) in enumerate(zip(axes, entries)):
+        matrix = entry["matrix"].astype(float)
+        values = matrix.to_numpy()
+        image = ax.imshow(
+            np.ma.masked_invalid(values),
+            cmap=cmap,
+            aspect="auto",
+            vmin=vmin,
+            vmax=vmax,
+        )
+
+        ax.set_title(entry["forecaster_id"])
+        ax.set_xlabel("Test dataset")
+        ax.set_xticks(np.arange(len(matrix.columns)))
+        ax.set_xticklabels(matrix.columns, rotation=45, ha="right")
+        ax.set_yticks(np.arange(len(matrix.index)))
+        ax.set_yticklabels(matrix.index)
+        if axis_index == 0:
+            ax.set_ylabel("Training dataset")
+
+        annotate_values = values.size <= 144
+        if annotate_values:
+            threshold = midpoint
+            if threshold is None:
+                finite_values = values[np.isfinite(values)]
+                threshold = float(np.nanmedian(finite_values)) if finite_values.size else 0.0
+            for row_index, train_id in enumerate(matrix.index):
+                for col_index, test_id in enumerate(matrix.columns):
+                    value = matrix.loc[train_id, test_id]
+                    if pd.isna(value):
+                        continue
+                    text_color = "white" if float(value) > threshold else "black"
+                    ax.text(
+                        col_index,
+                        row_index,
+                        f"{float(value):.3g}",
+                        ha="center",
+                        va="center",
+                        color=text_color,
+                        fontsize=7,
+                    )
+
+    fig.suptitle(title)
+    colorbar = fig.colorbar(image, ax=list(axes), shrink=0.88)
+    colorbar.set_label("Mean RMSE")
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+
+
 def plot_periodic_sanity_panels(
     dataset_paths,
     root=None,
@@ -1422,6 +1606,14 @@ def add_cli_args(parser):
         help="Prepare mixed-comparison split parquet files and exit.",
     )
     parser.add_argument(
+        "--plot-forecaster-matrices-only",
+        action="store_true",
+        help=(
+            "Plot selected forecaster mean_rmse_matrix.csv files side by side "
+            "with one global heatmap scale and exit."
+        ),
+    )
+    parser.add_argument(
         "--plot-periodic-only",
         action="store_true",
         help="Only create periodic sanity plots and exit.",
@@ -1477,6 +1669,7 @@ def run_from_args(args):
         train_dataset=args.train_dataset,
         aggregate_only=args.aggregate_only,
         prepare_splits_only=args.prepare_splits_only,
+        plot_forecaster_matrices_only=args.plot_forecaster_matrices_only,
         plot_periodic_only=args.plot_periodic_only,
         skip_periodic_plots=args.skip_periodic_plots,
         periodic_repeats=args.periodic_repeats,
