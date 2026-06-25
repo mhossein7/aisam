@@ -34,6 +34,7 @@ def run_forecaster_comparison(
     forecaster_root: Optional[PathLike] = None,
     train_dataset: Optional[str] = None,
     aggregate_only: bool = False,
+    fill_missing: bool = False,
     prepare_splits_only: bool = False,
     plot_forecaster_matrices_only: bool = False,
     plot_periodic_only: bool = False,
@@ -66,6 +67,7 @@ def run_forecaster_comparison(
         "aggregates": [],
         "prepared_splits": [],
         "combined_matrix_plots": [],
+        "fills": [],
     }
 
     if plot_forecaster_matrices_only:
@@ -84,6 +86,28 @@ def run_forecaster_comparison(
                         root=experiment_root,
                         reuse_existing=False,
                     )
+                )
+        return result
+
+    if fill_missing:
+        for recipe_path in recipe_paths:
+            result["fills"].append(
+                fill_missing_forecaster_recipe(
+                    recipe_path=recipe_path,
+                    root=experiment_root,
+                    train_dataset=train_dataset,
+                    reporter_species=reporter_species,
+                    visualization=visualization,
+                    include_main_periodic=include_main_periodic,
+                    include_test_periodic=include_test_periodic,
+                )
+            )
+        if train_dataset is None or aggregate_only:
+            for recipe_path in recipe_paths:
+                result["aggregates"].append(aggregate_forecaster_recipe(recipe_path))
+            if len(recipe_paths) > 1:
+                result["combined_matrix_plots"].append(
+                    plot_forecaster_rmse_matrices(recipe_paths=recipe_paths, root=experiment_root)
                 )
         return result
 
@@ -339,6 +363,7 @@ def run_forecaster_row(
             {
                 "train_dataset": train_id,
                 "test_dataset": test_id,
+                "model_path": result["model_path"],
                 "mean_rmse": mean_rmse,
                 "finite_windows": finite_windows,
                 "invalid_windows": invalid_windows,
@@ -358,6 +383,209 @@ def run_forecaster_row(
         "row_json": row_dir / f"{safe_filename(train_id)}.json",
         "row_csv": row_dir / f"{safe_filename(train_id)}.csv",
         "run_records": run_records,
+    }
+
+
+def fill_missing_forecaster_recipe(
+    recipe_path,
+    root=None,
+    train_dataset=None,
+    reporter_species=None,
+    visualization=None,
+    include_main_periodic=None,
+    include_test_periodic=None,
+):
+    recipe_path = Path(recipe_path)
+    recipe = load_recipe(recipe_path)
+    validate_forecaster_recipe(recipe, recipe_path)
+    if _is_mixed_recipe(recipe):
+        raise NotImplementedError("fill-missing mode is currently implemented for standard matrix recipes.")
+
+    experiment_root = Path(root).resolve() if root is not None else infer_experiment_root(recipe_path)
+    forecaster_dir = recipe_path.parent
+    datasets = recipe["datasets"]
+    dataset_ids = [dataset_id(dataset) for dataset in datasets]
+    dataset_paths = latest_dataset_paths(datasets, experiment_root)
+    species = _recipe_reporter_species(recipe, reporter_species)
+    model_config = reporter_only_model_config(
+        recipe["forecaster_model"],
+        dataset_paths,
+        species,
+        force_reporter_only=reporter_species is not None,
+    )
+    train_policy = _normalize_policy(
+        include_main_periodic
+        if include_main_periodic is not None
+        else recipe.get("include_main_periodic", DEFAULT_INCLUDE_MAIN_PERIODIC)
+    )
+    test_policy = _normalize_policy(
+        include_test_periodic
+        if include_test_periodic is not None
+        else recipe.get("include_test_periodic", DEFAULT_INCLUDE_TEST_PERIODIC)
+    )
+    use_visualization = (
+        bool(visualization)
+        if visualization is not None
+        else bool(recipe.get("visualization", True))
+    )
+
+    print_model_setup(recipe["id"], model_config, train_policy, test_policy)
+
+    if train_dataset is not None:
+        if train_dataset not in dataset_ids:
+            raise ValueError(
+                f"Unknown train dataset {train_dataset!r}. Available datasets: {dataset_ids}"
+            )
+        return fill_missing_forecaster_row(
+            recipe=recipe,
+            forecaster_dir=forecaster_dir,
+            dataset_ids=dataset_ids,
+            dataset_paths=dataset_paths,
+            model_config=model_config,
+            train_id=train_dataset,
+            include_main_periodic=train_policy,
+            include_test_periodic=test_policy,
+            visualization=use_visualization,
+        )
+
+    row_results = []
+    for train_id in dataset_ids:
+        row_results.append(
+            fill_missing_forecaster_row(
+                recipe=recipe,
+                forecaster_dir=forecaster_dir,
+                dataset_ids=dataset_ids,
+                dataset_paths=dataset_paths,
+                model_config=model_config,
+                train_id=train_id,
+                include_main_periodic=train_policy,
+                include_test_periodic=test_policy,
+                visualization=use_visualization,
+            )
+        )
+    return {
+        "recipe": recipe_path,
+        "forecaster_id": recipe["id"],
+        "rows": row_results,
+    }
+
+
+def fill_missing_forecaster_row(
+    recipe,
+    forecaster_dir,
+    dataset_ids,
+    dataset_paths,
+    model_config,
+    train_id,
+    include_main_periodic=DEFAULT_INCLUDE_MAIN_PERIODIC,
+    include_test_periodic=DEFAULT_INCLUDE_TEST_PERIODIC,
+    visualization=True,
+):
+    forecaster_dir = Path(forecaster_dir)
+    _bootstrap_row_outputs_from_existing_outputs(forecaster_dir, train_id, dataset_ids)
+    row_values, run_records = _load_row_state(forecaster_dir, train_id, dataset_ids)
+    completed_tests = [test_id for test_id in dataset_ids if _row_value_present(row_values.get(test_id))]
+    missing_tests = [test_id for test_id in dataset_ids if not _row_value_present(row_values.get(test_id))]
+
+    if not missing_tests:
+        print(f"[{recipe['id']}] no missing tests for train={train_id}", flush=True)
+        row_dir = forecaster_dir / "row_results"
+        return {
+            "forecaster_id": recipe["id"],
+            "train_dataset": train_id,
+            "row_json": row_dir / f"{safe_filename(train_id)}.json",
+            "row_csv": row_dir / f"{safe_filename(train_id)}.csv",
+            "run_records": run_records,
+            "filled_tests": [],
+            "skipped_tests": completed_tests,
+        }
+
+    trained_model = _find_trained_model_for_row(forecaster_dir, train_id, run_records)
+    if trained_model is None and completed_tests:
+        raise FileNotFoundError(
+            f"Cannot fill missing tests for train={train_id!r} because existing results "
+            "show this row was already trained, but no saved model.pkl could be found. "
+            f"Run on the machine that still has forecasters/{recipe['id']}/runs/{safe_filename(train_id)}/.../model.pkl."
+        )
+
+    filled_tests = []
+    for test_id in missing_tests:
+        label = f"{train_id}_to_{test_id}"
+        output_root = forecaster_dir / "runs" / safe_filename(train_id)
+        if trained_model is None:
+            print(
+                f"[{recipe['id']}] training missing row {train_id} "
+                f"({dataset_paths[train_id]}) and testing on {test_id} "
+                f"({dataset_paths[test_id]})",
+                flush=True,
+            )
+            result = cross_test_forecaster(
+                model=model_config,
+                training_data=dataset_paths[train_id],
+                test_data=dataset_paths[test_id],
+                output_root=output_root,
+                label=label,
+                random_state=recipe.get("random_seed"),
+                include_main_periodic=include_main_periodic,
+                include_test_periodic=include_test_periodic,
+                visualization=visualization,
+            )
+            trained_model = result["model_path"]
+        else:
+            print(
+                f"[{recipe['id']}] filling train={train_id}, test={test_id} "
+                f"with existing model {trained_model}",
+                flush=True,
+            )
+            result = cross_test_forecaster(
+                trained_model=trained_model,
+                test_data=dataset_paths[test_id],
+                output_root=output_root,
+                label=label,
+                random_state=recipe.get("random_seed"),
+                include_test_periodic=include_test_periodic,
+                visualization=visualization,
+            )
+
+        test_metrics = result["metrics"]["test"]
+        mean_rmse = test_metrics.get("rmse")
+        finite_windows = test_metrics.get("finite_windows")
+        invalid_windows = test_metrics.get("invalid_windows")
+        row_values[test_id] = mean_rmse
+        run_records = _replace_run_record(
+            run_records,
+            train_id,
+            test_id,
+            {
+                "train_dataset": train_id,
+                "test_dataset": test_id,
+                "model_path": result["model_path"],
+                "mean_rmse": mean_rmse,
+                "finite_windows": finite_windows,
+                "invalid_windows": invalid_windows,
+                "output_dir": result["output_dir"],
+                "test_performance_path": result["test_performance_path"],
+                "training_holdout_performance_path": result["training_holdout_performance_path"],
+            },
+        )
+        filled_tests.append(test_id)
+        print(
+            f"[{recipe['id']}] filled train={train_id}, test={test_id}, "
+            f"mean RMSE={_format_float(mean_rmse)}, "
+            f"finite windows={finite_windows}, invalid windows={invalid_windows}",
+            flush=True,
+        )
+        save_row_outputs(forecaster_dir, train_id, dataset_ids, row_values, run_records)
+
+    row_dir = forecaster_dir / "row_results"
+    return {
+        "forecaster_id": recipe["id"],
+        "train_dataset": train_id,
+        "row_json": row_dir / f"{safe_filename(train_id)}.json",
+        "row_csv": row_dir / f"{safe_filename(train_id)}.csv",
+        "run_records": run_records,
+        "filled_tests": filled_tests,
+        "skipped_tests": completed_tests,
     }
 
 
@@ -520,6 +748,7 @@ def run_mixed_forecaster_row(
                 "test_dataset": test_id,
                 "training_paths": training_paths,
                 "test_path": test_paths[test_id],
+                "model_path": result["model_path"],
                 "mean_rmse": mean_rmse,
                 "finite_windows": finite_windows,
                 "invalid_windows": invalid_windows,
@@ -1129,6 +1358,172 @@ def validate_feature_species(feature_species, species_by_dataset, output_species
         )
 
 
+def _bootstrap_row_outputs_from_existing_outputs(forecaster_dir, train_id, dataset_ids):
+    forecaster_dir = Path(forecaster_dir)
+    row_path = forecaster_dir / "row_results" / f"{safe_filename(train_id)}.json"
+    if row_path.exists():
+        return
+
+    row_values = {test_id: None for test_id in dataset_ids}
+    run_records = []
+
+    matrix_path = forecaster_dir / "mean_rmse_matrix.csv"
+    if matrix_path.exists():
+        matrix = pd.read_csv(matrix_path, index_col=0)
+        matrix = matrix.apply(pd.to_numeric, errors="coerce")
+        if train_id in matrix.index:
+            for test_id in dataset_ids:
+                if test_id in matrix.columns:
+                    value = matrix.loc[train_id, test_id]
+                    if not pd.isna(value):
+                        row_values[test_id] = float(value)
+
+    runs_path = forecaster_dir / "cross_testing_runs.json"
+    if runs_path.exists():
+        with open(runs_path, "r") as f:
+            records = json.load(f)
+        if isinstance(records, list):
+            for record in records:
+                if str(record.get("train_dataset")) != str(train_id):
+                    continue
+                test_id = str(record.get("test_dataset"))
+                if test_id in dataset_ids:
+                    run_records.append(record)
+                    value = record.get("mean_rmse")
+                    if _row_value_present(value):
+                        row_values[test_id] = value
+
+    if run_records or any(_row_value_present(value) for value in row_values.values()):
+        save_row_outputs(forecaster_dir, train_id, dataset_ids, row_values, run_records)
+
+
+def _load_row_state(forecaster_dir, train_id, dataset_ids):
+    row_path = Path(forecaster_dir) / "row_results" / f"{safe_filename(train_id)}.json"
+    row_values = {test_id: None for test_id in dataset_ids}
+    run_records = []
+    if not row_path.exists():
+        return row_values, run_records
+
+    with open(row_path, "r") as f:
+        row = json.load(f)
+    saved_values = row.get("mean_rmse_by_test", {})
+    for test_id in dataset_ids:
+        value = saved_values.get(test_id)
+        row_values[test_id] = None if value is None else value
+    run_records = list(row.get("run_records", []))
+    return row_values, run_records
+
+
+def _row_value_present(value):
+    if value is None:
+        return False
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
+def _find_trained_model_for_row(forecaster_dir, train_id, run_records):
+    forecaster_dir = Path(forecaster_dir)
+    candidates = []
+    for record in run_records:
+        if str(record.get("train_dataset")) != str(train_id):
+            continue
+        for key in ("model_path", "trained_model", "model_file"):
+            value = record.get(key)
+            if value:
+                candidates.extend(_candidate_model_paths(value, forecaster_dir))
+        output_dir = record.get("output_dir")
+        if output_dir:
+            candidates.extend(_candidate_model_paths(output_dir, forecaster_dir, append_model=True))
+
+    row_run_dir = forecaster_dir / "runs" / safe_filename(train_id)
+    if row_run_dir.exists():
+        candidates.extend(
+            sorted(
+                row_run_dir.glob("**/model.pkl"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        )
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _candidate_model_paths(value, forecaster_dir, append_model=False):
+    forecaster_dir = Path(forecaster_dir)
+    path = _expand_path(value)
+    if append_model:
+        path = path / "model.pkl"
+
+    candidates = [path]
+    if not path.is_absolute():
+        candidates.append(forecaster_dir / path)
+        experiment_root = _forecaster_experiment_root(forecaster_dir)
+        if experiment_root is not None:
+            candidates.append(experiment_root / path)
+
+    remapped_path = _remap_legacy_forecaster_path(path, forecaster_dir)
+    if remapped_path is not None:
+        candidates.append(remapped_path)
+
+    return _dedupe_paths(candidates)
+
+
+def _forecaster_experiment_root(forecaster_dir):
+    forecaster_dir = Path(forecaster_dir)
+    if forecaster_dir.parent.name == DEFAULT_FORECASTER_ROOT:
+        return forecaster_dir.parent.parent
+    return None
+
+
+def _remap_legacy_forecaster_path(path, forecaster_dir):
+    forecaster_dir = Path(forecaster_dir)
+    marker = (DEFAULT_FORECASTER_ROOT, forecaster_dir.name, "runs")
+    parts = path.parts
+    for index in range(0, len(parts) - len(marker) + 1):
+        if tuple(parts[index : index + len(marker)]) == marker:
+            suffix = parts[index + len(marker) :]
+            if suffix:
+                return forecaster_dir / "runs" / Path(*suffix)
+    return None
+
+
+def _dedupe_paths(paths):
+    deduped = []
+    seen = set()
+    for path in paths:
+        path = Path(path)
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+    return deduped
+
+
+def _expand_path(value):
+    return Path(str(value)).expanduser()
+
+
+def _replace_run_record(run_records, train_id, test_id, new_record):
+    replaced = False
+    updated = []
+    for record in run_records:
+        if str(record.get("train_dataset")) == str(train_id) and str(record.get("test_dataset")) == str(test_id):
+            if not replaced:
+                updated.append(new_record)
+                replaced = True
+            continue
+        updated.append(record)
+    if not replaced:
+        updated.append(new_record)
+    return updated
+
+
 def species_in_simulation_file(path):
     dataframe = pd.read_parquet(path, columns=["species"])
     return list(dict.fromkeys(dataframe["species"].astype(str)))
@@ -1601,6 +1996,14 @@ def add_cli_args(parser):
         help="Aggregate row_results into matrix CSV/JSON/plots without running training.",
     )
     parser.add_argument(
+        "--fill-missing",
+        action="store_true",
+        help=(
+            "Fill only missing train/test cells in a forecaster matrix. "
+            "Existing rows reuse saved model.pkl files when available."
+        ),
+    )
+    parser.add_argument(
         "--prepare-splits-only",
         action="store_true",
         help="Prepare mixed-comparison split parquet files and exit.",
@@ -1668,6 +2071,7 @@ def run_from_args(args):
         forecaster_root=args.forecaster_root,
         train_dataset=args.train_dataset,
         aggregate_only=args.aggregate_only,
+        fill_missing=args.fill_missing,
         prepare_splits_only=args.prepare_splits_only,
         plot_forecaster_matrices_only=args.plot_forecaster_matrices_only,
         plot_periodic_only=args.plot_periodic_only,
