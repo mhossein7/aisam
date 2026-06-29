@@ -8,6 +8,10 @@ from aisam.experiments.forecaster_comparison import (
     add_cli_args as _add_forecaster_comparison_args,
     run_from_args as _run_forecaster_comparison_from_args,
 )
+from aisam.experiments.forecaster_training_data import (
+    add_cli_args as _add_forecaster_training_data_args,
+    run_from_args as _run_forecaster_training_data_from_args,
+)
 from aisam.utils.forecaster_training import cross_test_forecaster, train_forecaster
 from aisam.utils.pipeline import run_recipe
 
@@ -40,6 +44,11 @@ def main(argv=None):
         help="Compatibility alias for `aisam compare-forecasters`.",
     )
     _add_forecaster_comparison_args(comparison_alias)
+    training_data = subparsers.add_parser(
+        "forecaster-training-data",
+        help="Run forecaster training-data size and balance experiments.",
+    )
+    _add_forecaster_training_data_args(training_data)
 
     args = parser.parse_args(argv)
     if args.command in {"run", "simulate"}:
@@ -76,6 +85,10 @@ def main(argv=None):
         return 0
     if args.command in {"compare-forecasters", "forecaster-comparison"}:
         result = _run_forecaster_comparison_from_args(args)
+        print(json.dumps(_json_safe(result), indent=2))
+        return 0
+    if args.command == "forecaster-training-data":
+        result = _run_forecaster_training_data_from_args(args)
         print(json.dumps(_json_safe(result), indent=2))
         return 0
 
