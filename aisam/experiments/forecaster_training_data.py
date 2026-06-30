@@ -46,6 +46,65 @@ DEFAULT_SAMPLE_ROOT = "sample_efficiency"
 DEFAULT_BALANCE_ROOT = "balance"
 DEFAULT_CIRCUITS = ("CcaSR", "Inverter", "double_inverter")
 
+SAMPLE_SUMMARY_COLUMNS = (
+    "mode",
+    "forecaster_id",
+    "dataset_id",
+    "circuit",
+    "solver",
+    "fraction",
+    "replicate",
+    "mean_rmse",
+    "train_cells",
+    "test_cells",
+)
+SAMPLE_AGGREGATE_COLUMNS = (
+    "forecaster_id",
+    "dataset_id",
+    "circuit",
+    "solver",
+    "fraction",
+    "mean_rmse_mean",
+    "mean_rmse_std",
+    "mean_rmse_count",
+    "train_cells_mean",
+    "test_cells_mean",
+)
+BALANCE_SUMMARY_COLUMNS = (
+    "mode",
+    "forecaster_id",
+    "solver",
+    "pair_id",
+    "left_circuit",
+    "right_circuit",
+    "test_dataset_id",
+    "test_circuit",
+    "ratio_left",
+    "ratio_right",
+    "replicate",
+    "mean_rmse",
+    "total_cells",
+    "left_cells",
+    "right_cells",
+)
+BALANCE_AGGREGATE_COLUMNS = (
+    "forecaster_id",
+    "solver",
+    "pair_id",
+    "left_circuit",
+    "right_circuit",
+    "test_dataset_id",
+    "test_circuit",
+    "ratio_left",
+    "ratio_right",
+    "mean_rmse_mean",
+    "mean_rmse_std",
+    "mean_rmse_count",
+    "total_cells_mean",
+    "left_cells_mean",
+    "right_cells_mean",
+)
+
 
 def run_training_data_experiment(
     root: Optional[PathLike] = None,
@@ -639,9 +698,8 @@ def aggregate_sample_results(recipe, experiment_root):
     aggregate_path = experiment_root / DEFAULT_SAMPLE_ROOT / "sample_efficiency_aggregate.csv"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     if not records:
-        empty = pd.DataFrame()
-        empty.to_csv(summary_path, index=False)
-        empty.to_csv(aggregate_path, index=False)
+        pd.DataFrame(columns=SAMPLE_SUMMARY_COLUMNS).to_csv(summary_path, index=False)
+        pd.DataFrame(columns=SAMPLE_AGGREGATE_COLUMNS).to_csv(aggregate_path, index=False)
         return {"summary": summary_path, "aggregate": aggregate_path, "records": 0}
 
     frame = pd.DataFrame(records)
@@ -672,9 +730,8 @@ def aggregate_balance_results(recipe, experiment_root):
     aggregate_path = experiment_root / DEFAULT_BALANCE_ROOT / "balance_aggregate.csv"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     if not records:
-        empty = pd.DataFrame()
-        empty.to_csv(summary_path, index=False)
-        empty.to_csv(aggregate_path, index=False)
+        pd.DataFrame(columns=BALANCE_SUMMARY_COLUMNS).to_csv(summary_path, index=False)
+        pd.DataFrame(columns=BALANCE_AGGREGATE_COLUMNS).to_csv(aggregate_path, index=False)
         return {"summary": summary_path, "aggregate": aggregate_path, "records": 0}
 
     frame = pd.DataFrame(records)
@@ -724,7 +781,7 @@ def plot_sample_efficiency_results(recipe, experiment_root):
     aggregate_path = experiment_root / DEFAULT_SAMPLE_ROOT / "sample_efficiency_aggregate.csv"
     if not aggregate_path.exists():
         raise FileNotFoundError(f"Missing sample-efficiency aggregate: {aggregate_path}")
-    aggregate = pd.read_csv(aggregate_path)
+    aggregate = read_csv_allow_empty(aggregate_path, SAMPLE_AGGREGATE_COLUMNS)
     if aggregate.empty:
         return []
 
@@ -754,7 +811,7 @@ def plot_balance_results(recipe, experiment_root):
     aggregate_path = experiment_root / DEFAULT_BALANCE_ROOT / "balance_aggregate.csv"
     if not aggregate_path.exists():
         raise FileNotFoundError(f"Missing balance aggregate: {aggregate_path}")
-    aggregate = pd.read_csv(aggregate_path)
+    aggregate = read_csv_allow_empty(aggregate_path, BALANCE_AGGREGATE_COLUMNS)
     if aggregate.empty:
         return []
 
@@ -911,7 +968,7 @@ def choose_balance_total_fractions(recipe, experiment_root, source_manifests, ov
     sample_aggregate_path = experiment_root / DEFAULT_SAMPLE_ROOT / "sample_efficiency_aggregate.csv"
     selected_by_forecaster_dataset = {}
     if sample_aggregate_path.exists():
-        aggregate = pd.read_csv(sample_aggregate_path)
+        aggregate = read_csv_allow_empty(sample_aggregate_path, SAMPLE_AGGREGATE_COLUMNS)
         if not aggregate.empty:
             for (forecaster_id, dataset_id_value), group in aggregate.groupby(["forecaster_id", "dataset_id"]):
                 selected_by_forecaster_dataset[(forecaster_id, dataset_id_value)] = select_plateau_fraction(
@@ -1249,6 +1306,14 @@ def balance_seed(recipe, pair_info, ratio, replicate, side):
 def load_json(path):
     with open(path, "r") as f:
         return json.load(f)
+
+
+def read_csv_allow_empty(path, columns):
+    """Read an aggregate CSV, including legacy zero-byte partial-phase files."""
+    try:
+        return pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=columns)
 
 
 def write_json(path, payload):
